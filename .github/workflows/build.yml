@@ -1,0 +1,63 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The platform-neutral core builds and tests anywhere. Kept as its own job so a contributor on
+  # macOS or Linux gets fast feedback on the logic that decides what counts as "not observed" —
+  # which is the part most worth testing and the part that needs no Windows at all.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build src/Merlin.Agent.Core --configuration Release
+      - run: dotnet test tests/Merlin.Agent.Core.Tests --configuration Release --logger "console;verbosity=normal"
+
+  # NativeAOT needs the target platform's toolchain, so the shippable binary is only ever produced
+  # here. Publishing from a developer machine is not possible and is not meant to be.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build --configuration Release
+      - run: dotnet test tests/Merlin.Agent.Core.Tests --configuration Release
+      - name: Publish (NativeAOT)
+        run: >
+          dotnet publish src/Merlin.Agent
+          --configuration Release --runtime win-x64 --self-contained
+          --output artifacts/win-x64
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "artifacts/win-x64"
+          # The manifest must travel WITH the binary: the agent refuses to run without it rather
+          # than inventing queries, so a package missing it would fail on every machine.
+          if (-not (Test-Path "$out/queries/windows.json")) {
+            New-Item -ItemType Directory -Path "$out/queries" -Force | Out-Null
+            Copy-Item packaging/queries/windows.json "$out/queries/windows.json"
+          }
+          Compress-Archive -Path "$out/*" -DestinationPath artifacts/merlin-agent-win-x64.zip -Force
+          $hash = (Get-FileHash artifacts/merlin-agent-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "SHA-256: $hash"
+          # The install script pins this value, so it is surfaced as a build output rather than
+          # left for somebody to compute by hand.
+          $hash | Out-File artifacts/merlin-agent-win-x64.zip.sha256 -NoNewline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merlin-agent-win-x64
+          path: |
+            artifacts/merlin-agent-win-x64.zip
+            artifacts/merlin-agent-win-x64.zip.sha256

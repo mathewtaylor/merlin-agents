@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Merlin.Agent.Core/Merlin.Agent.Core.csproj" />
+    <Project Path="src/Merlin.Agent/Merlin.Agent.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Merlin.Agent.Core.Tests/Merlin.Agent.Core.Tests.csproj" />
+  </Folder>
+</Solution>
