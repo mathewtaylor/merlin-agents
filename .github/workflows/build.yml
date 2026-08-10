@@ -1,8 +1,11 @@
 name: build
 
 on:
+  # Feature branches build too. The Windows job is the ONLY way to get a NativeAOT binary — it
+  # cannot be published from a developer machine — so restricting it to main would mean opening a
+  # pull request just to obtain something to test with.
   push:
-    branches: [main]
+    branches: [main, 'feature/**']
   pull_request:
   workflow_dispatch:
 
