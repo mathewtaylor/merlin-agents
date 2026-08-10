@@ -13,6 +13,27 @@ failure rather than a production outage.
 
 ---
 
+## Addressing
+
+The agent stores the base address it was installed from and appends the fixed relative paths below.
+It treats that base as **opaque**, so the server may qualify it without the agent knowing anything
+about tenancy:
+
+```
+https://acme.merlinassure.com                 subdomain-per-tenant — the planned model
+https://app.merlinassure.com/t/acme           reserved, for one shared hostname over
+                                              database-per-tenant
+```
+
+Both are served. The second exists because the ingest resolves a device by `Merlin-Device-Id`, and
+under a shared hostname it would have to choose a tenant's database *before* it could look that
+device up. A mismatched slug is **404**, not a refusal — a routing error rather than an
+authentication failure.
+
+**The stored address is effectively permanent**, which is why the shape is fixed now: an agent uses
+it forever, and changing it later means re-pointing every machine. `merlin-agent set-server` is the
+escape hatch, and it proves the new address before keeping it.
+
 ## Envelope
 
 Every request carries these headers:

@@ -34,6 +34,11 @@ Get the enrolment key from **Admin → Merlin Agent** in Merlin. The installer:
 The device then waits for an administrator to approve it. Until approved it counts towards no
 control.
 
+**The agent learns where to report from the address it was installed from** — the script bakes in
+the host that served it, so one binary works for every deployment with nothing to configure. If a
+deployment later moves, `merlin-agent set-server` re-points a machine; it proves the new address
+accepts a report before keeping it, so a typo cannot silently take the machine offline.
+
 ## Commands
 
 ```
@@ -41,6 +46,7 @@ merlin-agent enrol --server <url> --enrolment-key <key>
 merlin-agent collect                 # what the scheduled task runs
 merlin-agent status                  # the exact payload last sent
 merlin-agent status --manifest       # every query this agent runs
+merlin-agent set-server --server <url>
 merlin-agent rotate-key
 merlin-agent uninstall
 ```

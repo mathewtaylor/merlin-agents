@@ -51,6 +51,7 @@ public static class Program
                 "enrol" or "enroll" => await EnrolAsync(args).ConfigureAwait(false),
                 "collect" => await CollectAsync().ConfigureAwait(false),
                 "status" => Status(args),
+                "set-server" => await SetServerAsync(args).ConfigureAwait(false),
                 "rotate-key" => await RotateAsync().ConfigureAwait(false),
                 "uninstall" => Uninstall(),
                 "--version" or "-v" => Print(Version),
@@ -241,6 +242,92 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Re-points this machine at a different Merlin address.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Exists because the stored address is otherwise permanent.</b> An agent reports to whatever
+    /// it was installed from, so a deployment that moves — a custom domain, a rename, a tenant slug
+    /// being adopted — would leave every machine posting into the void. They would not error
+    /// visibly; they would simply go stale, and the freshness check would fire without saying why.
+    /// </para>
+    /// <para>
+    /// <b>The new address is PROVED before it is kept.</b> A typo would otherwise silently kill the
+    /// agent in exactly the way this command exists to prevent, so the collection runs against the
+    /// new address first and the old one is restored if it does not accept the report. The device
+    /// must already exist at the new address — same database, new hostname — which is what
+    /// distinguishes a moved deployment from a different one.
+    /// </para>
+    /// </remarks>
+    private static async Task<int> SetServerAsync(string[] args)
+    {
+        AgentStateData? state = AgentState.Read();
+
+        if (state is null)
+        {
+            Console.Error.WriteLine("This machine has not enrolled, so there is nothing to re-point.");
+            return 1;
+        }
+
+        string? server = ArgumentValue(args, "--server");
+
+        if (server is null)
+        {
+            Console.Error.WriteLine("Usage: merlin-agent set-server --server <url>");
+            return 1;
+        }
+
+        if (!Uri.TryCreate(server, UriKind.Absolute, out Uri? parsed)
+            || (parsed.Scheme != Uri.UriSchemeHttps && parsed.Scheme != Uri.UriSchemeHttp))
+        {
+            Console.Error.WriteLine($"'{server}' is not an absolute http or https address.");
+            return 1;
+        }
+
+        if (string.Equals(server.TrimEnd('/'), state.ServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"Already reporting to {state.ServerUrl}.");
+            return 0;
+        }
+
+        Console.WriteLine($"Testing {server} before switching...");
+
+        (ECDsa key, _) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
+
+        using (key)
+        {
+            OsqueryResults results = Collect(out string? osqueryVersion);
+            AgentReportPayload payload = BuildPayload(results, osqueryVersion);
+
+            using ReportClient client = new(server, key, Version);
+
+            // The clock offset is deliberately NOT carried over: it was learned against the old
+            // deployment, and a new one may be running a different clock. The client relearns it.
+            (TransportResult result, string json) = await client
+                .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow)
+                .ConfigureAwait(false);
+
+            if (!result.Succeeded)
+            {
+                Console.Error.WriteLine($"Refused by {server}: {result.Detail}");
+                Console.Error.WriteLine($"Still reporting to {state.ServerUrl}. Nothing was changed.");
+                return 1;
+            }
+
+            AgentState.Write(state with
+            {
+                ServerUrl = server.TrimEnd('/'),
+                ClockOffsetSeconds = client.ClockOffsetSeconds,
+                LastReportAt = DateTimeOffset.UtcNow,
+                LastReportJson = json,
+            });
+
+            Console.WriteLine($"Now reporting to {server}.");
+            return 0;
+        }
+    }
+
     private static async Task<int> RotateAsync()
     {
         AgentStateData? state = AgentState.Read();
@@ -357,6 +444,7 @@ public static class Program
               merlin-agent enrol --server <url> --enrolment-key <key>
               merlin-agent collect
               merlin-agent status [--manifest]
+              merlin-agent set-server --server <url>
               merlin-agent rotate-key
               merlin-agent uninstall
             """);
