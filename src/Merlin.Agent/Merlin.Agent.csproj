@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- net10.0-windows, not net10.0: CngKey and the registry reads are Windows-only, and the
+         platform-specific TFM is what lets the compiler prove it rather than emitting CA1416
+         warnings the build would then have to suppress. The platform-NEUTRAL half of the agent
+         (signing envelope, normalisation, wire contracts) lives in Merlin.Agent.Core so it stays
+         testable on any machine and so a macOS or Linux agent can reuse it unchanged. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Merlin.Agent</RootNamespace>
+    <AssemblyName>merlin-agent</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <InvariantTimezone>false</InvariantTimezone>
+    <StripSymbols>true</StripSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Merlin.Agent.Core\Merlin.Agent.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- DPAPI, for the software-key fallback on machines with no usable TPM. Not in the shared
+         framework; the package is AOT-compatible. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\packaging\queries\windows.json" CopyToOutputDirectory="PreserveNewest"
+          Link="queries\windows.json" />
+  </ItemGroup>
+
+</Project>
