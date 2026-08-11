@@ -90,7 +90,7 @@
       "purpose": "Local accounts holding administrator rights (A.8.2)."
     },
     "system_drive": {
-      "sql": "SELECT path, free_space, size FROM logical_drives WHERE type = 'Fixed' AND path = 'C:';",
+      "sql": "SELECT device_id, free_space, size FROM logical_drives WHERE type = 'Fixed' AND device_id = 'C:';",
       "purpose": "Free space on the system volume (A.8.6 capacity)."
     }
   }
