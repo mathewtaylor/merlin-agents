@@ -136,8 +136,13 @@ jobs:
           The binary is **not** Authenticode-signed, so Windows SmartScreen will warn on first run.
           EOF
 
+          # --repo is REQUIRED here: this job downloads an artifact and never checks the source
+          # out, so gh has no git remote to infer the repository from and fails with
+          # "not a git repository". Passing it explicitly is cheaper than an actions/checkout
+          # whose only purpose would be to create a .git directory for gh to read.
           gh release create "$TAG" \
             artifacts/merlin-agent-win-x64.zip \
             artifacts/merlin-agent-win-x64.zip.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --notes-file notes.md
