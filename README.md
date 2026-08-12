@@ -1,7 +1,7 @@
 # Merlin Agent
 
-A small, open-source agent that reports a Windows machine's security posture to a
-[Merlin](https://github.com/mathewtaylor/merlin) ISMS deployment, so an ISO 27001 auditor can be
+A small, open-source agent that reports a **Windows, macOS or Linux** machine's security posture to
+a [Merlin](https://github.com/mathewtaylor/merlin) ISMS deployment, so an ISO 27001 auditor can be
 shown evidence for disk encryption, antimalware, patching and endpoint hardening without anybody
 taking screenshots.
 
@@ -17,18 +17,29 @@ the complete list of what it reads.
 
 ## Install
 
-One line, in an elevated PowerShell prompt. Your Merlin deployment serves the script and pins the
-SHA-256 of every binary it downloads:
+One line. Your Merlin deployment serves the script and pins the SHA-256 of every binary it
+downloads.
+
+**Windows** — an elevated PowerShell prompt:
 
 ```powershell
 & ([scriptblock]::Create((irm https://isms.example.com/agent/install.ps1))) -EnrolmentKey 'MRLN-...'
 ```
 
-Get the enrolment key from **Admin → Merlin Agent** in Merlin. The installer:
+**macOS and Linux** — a root shell. One script serves both; it detects the platform and
+architecture and fetches the matching package:
+
+```bash
+curl -fsSL https://isms.example.com/agent/install.sh | sudo sh -s -- --enrolment-key 'MRLN-...'
+```
+
+Get the enrolment key from **Admin → Merlin Agent** in Merlin, which shows the exact command for
+each platform you have configured. The installer:
 
 1. downloads and hash-verifies the agent and osquery,
 2. enrols the machine (generating a signing key that never leaves it),
-3. registers a scheduled task that collects every six hours,
+3. registers a scheduled task (Windows), launch daemon (macOS) or systemd timer (Linux) that
+   collects every six hours,
 4. runs one collection immediately, so the device appears straight away.
 
 The device then waits for an administrator to approve it. Until approved it counts towards no
@@ -60,26 +71,34 @@ SQL* — an administrator can paste any query into `osqueryi` and get identical 
 stronger assurance than reading anybody's collector code.
 
 **`osqueryi`, one-shot — never the `osqueryd` daemon.** The daemon's distinctive value is scheduled
-query packs and evented ETW tables, and nothing downstream reads either: Merlin records one check
-result per day. So the agent shells out for about a second, six times a day, and exits.
+query packs and evented tables, and nothing downstream reads either: Merlin records one check result
+per day. So the agent shells out for about a second, six times a day, and exits.
 
-**A scheduled task, not a service.** Zero resident footprint, no listening socket, and the binary is
+**A scheduled run, not a service.** Zero resident footprint, no listening socket, and the binary is
 never file-locked so an update is a swap. A crashed run fires again next interval instead of staying
 dead and looking like a passing check.
+
+**Each platform is read on its own terms.** macOS and Linux expose less of their security posture at
+machine scope than Windows does, and the gaps are left as gaps rather than filled with guesses — a
+signal that cannot be read is reported as *not observed*, which Merlin will not fail a control on.
+[docs/collection-manifest.md](docs/collection-manifest.md) lists every one of them.
 
 | | |
 |---|---|
 | Idle footprint | 0 MB, 0% CPU — no resident process |
 | Active | ~2–3 s every 6 hours |
 | Install size | ~12 MB agent + osquery |
-| Editions | Windows Home, Pro, Enterprise, Server |
+| Platforms | Windows (Home, Pro, Enterprise, Server), macOS (Apple silicon), Linux |
+| Architectures | `win-x64`, `osx-arm64`, `linux-x64`, `linux-arm64` |
 | Runtime | none — single self-contained NativeAOT executable |
 
 ## Security
 
-Every request is signed with an ECDSA P-256 key created on the machine at enrolment, held in the
-**TPM and non-exportable** where one is available, and in a DPAPI-protected file where it is not.
-Merlin records which, and shows it against the device.
+Every request is signed with an ECDSA P-256 key created on the machine at enrolment. On Windows it
+is held in the **TPM and non-exportable** where one is available, and in a DPAPI-protected file
+where it is not. On macOS and Linux it is held in a root-only file — this agent does not yet reach
+the Secure Enclave or a TPM there, and **reports the attestation it actually has rather than the one
+the hardware could support**. Merlin records which, and shows it against the device.
 
 **A signature proves provenance, not truth.** It proves a report arrived intact from a holder of the
 enrolled key. It does *not* prove the machine told the truth — a local administrator can modify this
@@ -92,20 +111,28 @@ pretending otherwise.
 ```bash
 dotnet build                                    # any platform
 dotnet test                                     # any platform — the core is platform-neutral
-dotnet publish src/Merlin.Agent -r win-x64 -c Release   # Windows only (NativeAOT)
+dotnet publish src/Merlin.Agent -r osx-arm64 -c Release   # NativeAOT, this machine's architecture
 ```
 
-The NativeAOT publish needs a Windows toolchain, so release binaries are produced by CI on
-`windows-latest`. `Merlin.Agent.Core` targets `net10.0` and holds everything platform-neutral —
-the wire contracts, the signature envelope, and the osquery normalisation — so the logic that
-decides what counts as *not observed* is testable anywhere.
+**NativeAOT cannot be cross-compiled**, so each shippable binary is produced by CI on a runner of
+that architecture.
+
+**Intel Macs (`osx-x64`) are not currently published.** They need an Intel-hosted macOS runner and
+cannot be built on Apple silicon; `macos-13` was the last GitHub-hosted Intel image and no longer
+picks jobs up. The source builds for `osx-x64` unchanged — run the publish command above on an
+Intel Mac if you need one — but no release asset is produced, so Merlin does not offer an Intel-Mac
+install command. Restoring it means a self-hosted runner and putting the matrix entry back.
+
+`Merlin.Agent.Core` targets `net10.0` and holds everything platform-neutral
+— the wire contracts, the signature envelope, and all three osquery normalisers — so the logic that
+decides what counts as *not observed* is testable on any machine, for every platform.
 
 ## Repository layout
 
 ```
-src/Merlin.Agent.Core/     wire contracts · signature envelope · osquery normalisation
-src/Merlin.Agent/          TPM key · osquery runner · transport · CLI          (Windows)
-packaging/queries/         the collection manifest — the complete list of what is read
+src/Merlin.Agent.Core/     wire contracts · signature envelope · per-platform normalisers
+src/Merlin.Agent/          key stores · osquery runner · host readers · transport · CLI
+packaging/queries/         the collection manifests — the complete list of what is read
 docs/                      protocol · security · privacy · collection manifest
 ```
 

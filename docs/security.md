@@ -51,11 +51,34 @@ property actually being sold (you can read this code) for the appearance of one.
 | | |
 |---|---|
 | Algorithm | ECDSA P-256, SHA-256, IEEE P1363 signatures |
-| Preferred storage | TPM via CNG `Microsoft Platform Crypto Provider`, `ExportPolicy = None`, machine scope |
-| Fallback | Software key, DPAPI `LocalMachine` scope |
 | Reported to Merlin | `Tpm` or `Software`, on every enrolment |
 
-**P-256 rather than Ed25519** because TPM support for it is universal and Ed25519's is not.
+| Platform | Storage | Attestation reported |
+|---|---|---|
+| Windows | TPM via CNG `Microsoft Platform Crypto Provider`, `ExportPolicy = None`, machine scope | `Tpm` |
+| Windows (no usable TPM) | File, DPAPI `LocalMachine` scope | `Software` |
+| macOS | File in `/Library/Application Support/Merlin Agent`, mode `0600`, root-owned | `Software` |
+| Linux | File in `/var/lib/merlin-agent`, mode `0600`, root-owned | `Software` |
+
+**P-256 rather than Ed25519** because TPM and Secure Enclave support for it is universal and
+Ed25519's is not.
+
+**Only Windows currently reaches a hardware key store, and that is a limitation of this agent
+rather than of the hardware.** Apple silicon has a Secure Enclave and most Linux machines have a
+TPM 2.0; both can hold a non-exportable P-256 key. Reaching them means P/Invoking
+`Security.framework` and speaking to `/dev/tpmrm0` respectively, neither of which .NET exposes, so
+it is not built yet. **The attestation reported is a statement about where the key actually is, not
+about what the machine is capable of** — a Mac reporting `Tpm` while holding its key in a file would
+be exactly the unearned assurance this design refuses everywhere else. Merlin shows the difference
+against each device.
+
+**On macOS and Linux the key is protected by file permissions, not by encryption at rest.** There is
+no DPAPI equivalent worth the name: the Keychain and the kernel keyring both hold the key under the
+same root identity the agent already runs as, so encrypting with them would protect it from an
+attacker who is by construction already root and can read the process's memory. Saying "0600,
+root-owned" is the accurate description; calling it "encrypted at rest" would be theatre. The
+permissions are applied when the file is created, not afterwards, so the key is never briefly
+world-readable.
 
 **The software fallback is not optional.** The organisations this agent is built for run consumer
 hardware, and a machine with no usable TPM is common rather than exceptional. Refusing to enrol it
@@ -63,10 +86,17 @@ would leave it entirely unmonitored — strictly worse than monitoring it with a
 so. Merlin shows the attestation beside the device precisely so the difference is visible rather
 than averaged away.
 
-**Rotation** is authenticated by the *outgoing* key. A device that has lost its key cannot rotate
-and must re-enrol, producing a second device row for an administrator to reconcile — the honest
-outcome, since from Merlin's side an unrecoverable key is indistinguishable from a different
-machine.
+**Rotation** is authenticated by the *outgoing* key, and the incoming key is written only after
+Merlin has accepted it — a refused rotation leaves the machine reporting exactly as before. A device
+that has lost its key cannot rotate and must re-enrol, producing a second device row for an
+administrator to reconcile: the honest outcome, since from Merlin's side an unrecoverable key is
+indistinguishable from a different machine.
+
+**A TPM-held key cannot be rotated in place, and the command refuses rather than downgrading.** Its
+value is that it is non-exportable and lives under one fixed container name, so the outgoing and
+incoming keys cannot both exist; the obvious shortcut — replacing it with a software key — would
+quietly turn the strongest evidence Merlin holds about a machine into the weakest without anyone
+deciding to. Re-enrolling is the supported path.
 
 ---
 
@@ -119,16 +149,31 @@ The install script is served over TLS by the customer's own Merlin deployment an
 of every binary it downloads**, verifying before executing anything. A compromised release host
 therefore cannot ship a different agent to a given deployment.
 
-**Authenticode signing is an open item.** Unsigned, SmartScreen will warn on a SYSTEM-level security
-agent — a poor first impression for an ISMS product, and worth resolving before wide distribution.
+**Code signing is an open item on every platform.** Unsigned, Windows SmartScreen warns on a
+SYSTEM-level security agent, and macOS Gatekeeper refuses a quarantined binary outright. The install
+script clears the quarantine attribute from the download it made itself — which covers the scripted
+install, and deliberately nothing else: a binary a user downloaded by hand still needs clearing by
+hand, because the script vouches only for what it verified against a pinned hash. Signing (Azure
+Trusted Signing for Windows, an Apple Developer ID for macOS) is worth resolving before wide
+distribution.
 
 ---
 
 ## 6. What the agent can reach
 
-The agent runs as SYSTEM, which is what reading BitLocker state and the local security policy
-requires. It makes outbound HTTPS requests to exactly one host — the Merlin deployment it enrolled
-with, recorded in its state file — and listens on nothing.
+The agent runs with administrative rights — SYSTEM on Windows, root on macOS and Linux — which is
+what reading disk-encryption state and the local security policy requires. It makes outbound HTTPS
+requests to exactly one host — the Merlin deployment it enrolled with, recorded in its state file —
+and listens on nothing.
 
-It writes to two places: `%ProgramData%\Merlin Agent\state.json` (no secrets; readable by anyone
-curious) and, on machines with no TPM, `device.key` (DPAPI-protected).
+It writes to two files, in one directory per platform:
+
+| Platform | Directory |
+|---|---|
+| Windows | `%ProgramData%\Merlin Agent` |
+| macOS | `/Library/Application Support/Merlin Agent` |
+| Linux | `/var/lib/merlin-agent` |
+
+`state.json` holds no secret and is readable by anyone curious — that is the point of it, and it is
+what `merlin-agent status` prints. `device.key` exists only where the key is software-held, and is
+protected as described in § 2.

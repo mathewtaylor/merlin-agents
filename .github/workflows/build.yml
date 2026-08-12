@@ -1,14 +1,14 @@
 name: build
 
 on:
-  # Feature branches build too. The Windows job is the ONLY way to get a NativeAOT binary — it
-  # cannot be published from a developer machine — so restricting it to main would mean opening a
-  # pull request just to obtain something to test with.
+  # Feature branches build too. The per-platform jobs are the ONLY way to get a NativeAOT binary —
+  # it cannot be cross-compiled, so each RID needs a runner of that architecture — so restricting
+  # them to main would mean opening a pull request just to obtain something to test with.
   push:
     branches: [main, 'feature/**']
     # A `v*` tag builds and then publishes. Releasing through the SAME workflow rather than a
-    # separate one is deliberate: the bytes attached to the release are the bytes the Windows job
-    # built and tested, not a second build of the same commit that nobody exercised.
+    # separate one is deliberate: the bytes attached to the release are the bytes these jobs built
+    # and tested, not a second build of the same commit that nobody exercised.
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -18,8 +18,8 @@ permissions:
 
 jobs:
   # The platform-neutral core builds and tests anywhere. Kept as its own job so a contributor on
-  # macOS or Linux gets fast feedback on the logic that decides what counts as "not observed" —
-  # which is the part most worth testing and the part that needs no Windows at all.
+  # any machine gets fast feedback on the logic that decides what counts as "not observed" — which
+  # is the part most worth testing and the part that needs no particular OS at all.
   core:
     runs-on: ubuntu-latest
     steps:
@@ -30,52 +30,125 @@ jobs:
       - run: dotnet build src/Merlin.Agent.Core --configuration Release
       - run: dotnet test tests/Merlin.Agent.Core.Tests --configuration Release --logger "console;verbosity=normal"
 
-  # NativeAOT needs the target platform's toolchain, so the shippable binary is only ever produced
-  # here. Publishing from a developer machine is not possible and is not meant to be.
-  windows:
-    runs-on: windows-latest
+  # NativeAOT needs the target platform's own toolchain and cannot be cross-compiled, so every
+  # shippable binary is produced on a runner of that architecture. Publishing from a developer
+  # machine is not possible and is not meant to be.
+  #
+  # The matrix is the fleet this product actually meets: Windows and Apple-silicon Macs on the
+  # desk, x64 and arm64 Linux on the servers and the cheap boxes.
+  #
+  # INTEL MACS (osx-x64) ARE NOT BUILT, and that is a capacity fact rather than a decision about
+  # the platform. NativeAOT cannot be cross-compiled, so an Intel binary needs an Intel runner;
+  # macos-13 was the last GitHub-hosted Intel image and it no longer picks jobs up — the entry sat
+  # queued for forty minutes without ever starting, which matters more than it sounds because
+  # `release` needs the WHOLE matrix: one job that never starts publishes nothing at all, rather
+  # than publishing the four that built. So the entry is removed rather than left to hang.
+  #
+  # Nothing downstream breaks. Merlin serves an install command only for platforms it has a pinned
+  # hash for and refuses the rest, so an Intel Mac is simply not offered — the same posture as any
+  # unconfigured platform. Restoring it needs a self-hosted Intel runner; put the entry back and
+  # nothing else changes.
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+            archive: zip
+          - runner: macos-15
+            rid: osx-arm64
+            archive: tar
+          - runner: ubuntu-latest
+            rid: linux-x64
+            archive: tar
+          - runner: ubuntu-24.04-arm
+            rid: linux-arm64
+            archive: tar
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+
+      # NativeAOT links with clang and needs zlib's headers. Both are absent from the bare Ubuntu
+      # image, and the failure is a linker error deep in the publish rather than a missing-tool
+      # message anyone would recognise.
+      - name: Install the native toolchain
+        if: startsWith(matrix.rid, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
       - run: dotnet build --configuration Release
       - run: dotnet test tests/Merlin.Agent.Core.Tests --configuration Release
+
       - name: Publish (NativeAOT)
         run: >
           dotnet publish src/Merlin.Agent
-          --configuration Release --runtime win-x64 --self-contained
-          --output artifacts/win-x64
-      - name: Package
+          --configuration Release --runtime ${{ matrix.rid }} --self-contained
+          --output artifacts/${{ matrix.rid }}
+
+      # zip on Windows, tar.gz everywhere else. This is NOT a stylistic choice: the zip format as
+      # written by Compress-Archive does not carry the Unix executable bit, so a zipped macOS or
+      # Linux agent extracts without +x and the installer's first `merlin-agent enrol` fails with a
+      # permission error on every machine in the fleet.
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $out = "artifacts/win-x64"
-          # The manifest must travel WITH the binary: the agent refuses to run without it rather
-          # than inventing queries, so a package missing it would fail on every machine.
-          if (-not (Test-Path "$out/queries/windows.json")) {
-            New-Item -ItemType Directory -Path "$out/queries" -Force | Out-Null
-            Copy-Item packaging/queries/windows.json "$out/queries/windows.json"
-          }
-          Compress-Archive -Path "$out/*" -DestinationPath artifacts/merlin-agent-win-x64.zip -Force
-          $hash = (Get-FileHash artifacts/merlin-agent-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $out = "artifacts/${{ matrix.rid }}"
+          # The manifests must travel WITH the binary: the agent refuses to run without the pack
+          # for its own platform rather than inventing queries, so a package missing them would
+          # fail on every machine.
+          New-Item -ItemType Directory -Path "$out/queries" -Force | Out-Null
+          Copy-Item packaging/queries/*.json "$out/queries/" -Force
+          $name = "merlin-agent-${{ matrix.rid }}.zip"
+          Compress-Archive -Path "$out/*" -DestinationPath "artifacts/$name" -Force
+          $hash = (Get-FileHash "artifacts/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "SHA-256: $hash"
           # The install script pins this value, so it is surfaced as a build output rather than
           # left for somebody to compute by hand.
-          $hash | Out-File artifacts/merlin-agent-win-x64.zip.sha256 -NoNewline
+          $hash | Out-File "artifacts/$name.sha256" -NoNewline
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar'
+        run: |
+          set -euo pipefail
+          out="artifacts/${{ matrix.rid }}"
+          mkdir -p "$out/queries"
+          cp packaging/queries/*.json "$out/queries/"
+          # Belt and braces: dotnet publish already marks the apphost executable, but a package
+          # whose binary is not executable is indistinguishable at install time from a corrupt
+          # download and costs a support call per machine.
+          chmod +x "$out/merlin-agent"
+          name="merlin-agent-${{ matrix.rid }}.tar.gz"
+          tar -czf "artifacts/$name" -C "$out" .
+          if command -v sha256sum >/dev/null; then
+            hash=$(sha256sum "artifacts/$name" | cut -d' ' -f1)
+          else
+            hash=$(shasum -a 256 "artifacts/$name" | cut -d' ' -f1)
+          fi
+          echo "SHA-256: $hash"
+          printf '%s' "$hash" > "artifacts/$name.sha256"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: merlin-agent-win-x64
+          name: merlin-agent-${{ matrix.rid }}
           path: |
-            artifacts/merlin-agent-win-x64.zip
-            artifacts/merlin-agent-win-x64.zip.sha256
+            artifacts/merlin-agent-${{ matrix.rid }}.zip
+            artifacts/merlin-agent-${{ matrix.rid }}.zip.sha256
+            artifacts/merlin-agent-${{ matrix.rid }}.tar.gz
+            artifacts/merlin-agent-${{ matrix.rid }}.tar.gz.sha256
+          if-no-files-found: error
 
-  # Publishes the tested package as a GitHub release asset. Only on a `v*` tag.
+  # Publishes the tested packages as GitHub release assets. Only on a `v*` tag.
   #
   # This exists because the installer downloads the agent ANONYMOUSLY, from a customer's machine,
   # with no credentials — so an Actions artifact cannot serve it: those need auth, expire, and have
-  # no stable address. A public release asset is the only thing `Invoke-WebRequest` can reach.
+  # no stable address. A public release asset is the only thing curl and Invoke-WebRequest can
+  # reach.
   release:
-    needs: [core, windows]
+    needs: [core, package]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -84,7 +157,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: merlin-agent-win-x64
+          pattern: merlin-agent-*
+          merge-multiple: true
           path: artifacts
 
       - name: Publish release
@@ -93,56 +167,76 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          SHA=$(cat artifacts/merlin-agent-win-x64.zip.sha256)
+          cd artifacts
 
-          # Re-derive the hash here rather than trusting the file that travelled with the zip: the
-          # value an operator pastes into Merlin is what every machine in the fleet verifies
-          # against, so it is checked against the artifact as downloaded, not as reported.
-          ACTUAL=$(sha256sum artifacts/merlin-agent-win-x64.zip | cut -d' ' -f1)
-          if [ "$SHA" != "$ACTUAL" ]; then
-            echo "Recorded hash $SHA does not match the artifact ($ACTUAL). Refusing to publish."
-            exit 1
-          fi
+          # Re-derive every hash here rather than trusting the file that travelled with the
+          # archive: the value an operator pastes into Merlin is what every machine in the fleet
+          # verifies against, so it is checked against the artifact as downloaded, not as reported.
+          for recorded in *.sha256; do
+            archive="${recorded%.sha256}"
+            expected=$(cat "$recorded")
+            actual=$(sha256sum "$archive" | cut -d' ' -f1)
+            if [ "$expected" != "$actual" ]; then
+              echo "Recorded hash for $archive ($expected) does not match the artifact ($actual). Refusing to publish."
+              exit 1
+            fi
+          done
 
-          # The URL is VERSION-PINNED, never /releases/latest/download/. Merlin pins the SHA-256
-          # alongside the address, so a floating URL would mean the next release breaks every
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          {
+            echo "Merlin Agent for Windows, macOS and Linux — NativeAOT and self-contained."
+            echo
+            echo "## Merlin configuration"
+            echo
+            echo "Set the agent version once, then one address and hash for each platform you deploy to."
+            echo
+            echo '| Setting | Value |'
+            echo '| --- | --- |'
+            echo "| \`Merlin:Endpoints:AgentVersion\` | \`${TAG}\` |"
+            echo
+            echo '| Platform | Setting prefix | Address | SHA-256 |'
+            echo '| --- | --- | --- | --- |'
+          } > notes.md
+
+          # The URLs are VERSION-PINNED, never /releases/latest/download/. Merlin pins the SHA-256
+          # alongside each address, so a floating URL would mean the next release breaks every
           # install with a hash mismatch. The two values move together, by design — publishing a
           # release is therefore also an instruction to update both.
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/merlin-agent-win-x64.zip"
+          for archive in merlin-agent-*.tar.gz merlin-agent-*.zip; do
+            [ -e "$archive" ] || continue
+            rid="${archive#merlin-agent-}"
+            rid="${rid%.tar.gz}"
+            rid="${rid%.zip}"
+            hash=$(cat "$archive.sha256")
+            echo "| \`$rid\` | \`Merlin:Endpoints:Packages:$rid\` | \`$base/$archive\` | \`$hash\` |" >> notes.md
+          done
 
-          cat > notes.md <<EOF
-          Windows agent, \`win-x64\`, NativeAOT and self-contained.
+          {
+            echo
+            echo "The installer refuses to serve a platform without both its address and its hash —"
+            echo "a script that downloads an unpinned binary is worse than no script. Platforms left"
+            echo "unconfigured simply do not appear on \`/admin/agent\`."
+            echo
+            echo "## Verify"
+            echo
+            echo 'Each archive is published beside a `.sha256` file holding its digest.'
+            echo
+            echo "## Signing"
+            echo
+            echo "The binaries are **not** code-signed. Windows SmartScreen warns on first run, and"
+            echo "macOS Gatekeeper refuses a quarantined binary — the install script clears the"
+            echo "quarantine attribute from its own download, which covers the scripted install but"
+            echo "not a manual double-click."
+          } >> notes.md
 
-          ## Merlin configuration
-
-          Set these on the Merlin deployment that will receive the reports:
-
-          | Setting | Value |
-          | --- | --- |
-          | \`Merlin:Endpoints:AgentVersion\` | \`${TAG}\` |
-          | \`Merlin:Endpoints:AgentPackageEndpoint\` | \`${URL}\` |
-          | \`Merlin:Endpoints:AgentSha256\` | \`${SHA}\` |
-
-          The installer refuses to serve without the address and the hash together — a script that
-          downloads an unpinned binary is worse than no script.
-
-          ## Verify
-
-          \`\`\`
-          sha256sum merlin-agent-win-x64.zip
-          ${SHA}
-          \`\`\`
-
-          The binary is **not** Authenticode-signed, so Windows SmartScreen will warn on first run.
-          EOF
-
-          # --repo is REQUIRED here: this job downloads an artifact and never checks the source
-          # out, so gh has no git remote to infer the repository from and fails with
-          # "not a git repository". Passing it explicitly is cheaper than an actions/checkout
-          # whose only purpose would be to create a .git directory for gh to read.
+          # --repo is REQUIRED here: this job downloads artifacts and never checks the source out,
+          # so gh has no git remote to infer the repository from and fails with "not a git
+          # repository". Passing it explicitly is cheaper than an actions/checkout whose only
+          # purpose would be to create a .git directory for gh to read.
           gh release create "$TAG" \
-            artifacts/merlin-agent-win-x64.zip \
-            artifacts/merlin-agent-win-x64.zip.sha256 \
+            merlin-agent-*.tar.gz merlin-agent-*.tar.gz.sha256 \
+            merlin-agent-*.zip merlin-agent-*.zip.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --notes-file notes.md

@@ -1,9 +1,9 @@
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using Merlin.Agent.Collection;
 using Merlin.Agent.Core.Collection;
 using Merlin.Agent.Core.Contracts;
 using Merlin.Agent.Crypto;
+using Merlin.Agent.Platform;
 using Merlin.Agent.State;
 using Merlin.Agent.Transport;
 
@@ -15,21 +15,21 @@ namespace Merlin.Agent;
 /// <remarks>
 /// <para>
 /// <b>A one-shot process, not a service.</b> It runs, collects, reports and exits — typically in
-/// two or three seconds, every six hours, from a scheduled task. Nothing stays resident, so idle
-/// cost is zero and there is no listening socket on an employee machine; a crashed run simply fires
-/// again next interval instead of staying dead and looking like a passing check; and the binary is
-/// never locked, so updating it is a file swap.
+/// two or three seconds, every six hours, from the platform's own scheduler. Nothing stays resident,
+/// so idle cost is zero and there is no listening socket on an employee machine; a crashed run
+/// simply fires again next interval instead of staying dead and looking like a passing check; and
+/// the binary is never locked, so updating it is a file swap.
 /// </para>
 /// <para>
 /// <b>It reads facts about the MACHINE and never about the person using it.</b> There is no query
 /// for the signed-in user, the session or any mail address, and no configuration that adds one. See
-/// <c>packaging/queries/windows.json</c> for the complete list of what is read.
+/// <c>packaging/queries/</c> for the complete list of what is read on each platform, or run
+/// <c>merlin-agent status --manifest</c> on the machine itself.
 /// </para>
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public static class Program
 {
-    private const string Version = "0.1.0";
+    private const string Version = "0.2.0";
 
     /// <summary>Entry point.</summary>
     /// <param name="args">Command-line arguments.</param>
@@ -37,6 +37,18 @@ public static class Program
     public static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
+
+        if (AgentPlatformInfo.Current == AgentOs.Unsupported)
+        {
+            // Refusing beats falling through to the nearest collector. A platform with no query
+            // pack would produce readings taken from files that do not mean what the collector
+            // thinks they mean — a report full of confident, wrong observations, which is worse for
+            // an ISMS than no report at all.
+            Console.Error.WriteLine(
+                "merlin-agent supports Windows, macOS and Linux. This machine is none of them, and "
+                + "the agent will not guess at how to read it.");
+            return 1;
+        }
 
         if (args.Length == 0)
         {
@@ -62,8 +74,8 @@ public static class Program
             or CryptographicException or HttpRequestException)
         {
             // Expected operational failures: no network, no permission, no TPM. Reported plainly and
-            // with a non-zero exit code so the scheduled task's history shows the failure, rather
-            // than a stack trace nobody will read.
+            // with a non-zero exit code so the scheduler's history shows the failure, rather than a
+            // stack trace nobody will read.
             Console.Error.WriteLine($"merlin-agent: {exception.Message}");
             return 1;
         }
@@ -85,13 +97,13 @@ public static class Program
 
         using (key)
         {
-            OsqueryResults results = Collect(out string? osqueryVersion);
-            AgentReportPayload payload = BuildPayload(results, osqueryVersion);
+            AgentReportPayload payload = Collect();
 
             AgentEnrolRequest request = new(
                 DeviceKey.PublicKey(key),
                 attestation.ToString(),
                 Version,
+                AgentPlatformInfo.Wire,
                 payload.Hostname,
                 payload.MachineGuid,
                 payload.SerialNumber,
@@ -122,14 +134,12 @@ public static class Program
                 LastReportJson: null));
 
             Console.WriteLine($"Enrolled as {response.DeviceCode} ({response.Status}).");
+            Console.WriteLine($"Platform:    {AgentPlatformInfo.DisplayName}");
             Console.WriteLine($"Signing key: {attestation}.");
 
-            if (attestation == KeyAttestation.Software)
+            if (DeviceKey.ExplainAttestation(attestation) is { Length: > 0 } explanation)
             {
-                Console.WriteLine(
-                    "  No usable TPM was found, so the key is held in software. Merlin records this "
-                    + "and shows it against the device: a software key is weaker evidence because it "
-                    + "can be copied.");
+                Console.WriteLine(explanation);
             }
 
             return 0;
@@ -151,8 +161,7 @@ public static class Program
 
         using (key)
         {
-            OsqueryResults results = Collect(out string? osqueryVersion);
-            AgentReportPayload payload = BuildPayload(results, osqueryVersion);
+            AgentReportPayload payload = Collect();
 
             using ReportClient client = new(state.ServerUrl, key, Version);
 
@@ -198,10 +207,17 @@ public static class Program
         if (state is null)
         {
             Console.WriteLine("This machine has not enrolled.");
-            return 0;
+
+            // The manifest is still worth printing: somebody deciding whether to ALLOW the agent
+            // onto their machine is exactly the person who should be able to read what it would
+            // collect, and they will ask before it is enrolled rather than after.
+            return args.Contains("--manifest", StringComparer.OrdinalIgnoreCase)
+                ? PrintManifest()
+                : 0;
         }
 
         Console.WriteLine($"Device:      {state.DeviceCode} ({state.DeviceId})");
+        Console.WriteLine($"Platform:    {AgentPlatformInfo.DisplayName}");
         Console.WriteLine($"Reports to:  {state.ServerUrl}");
         Console.WriteLine($"Enrolled:    {state.EnrolledAt:yyyy-MM-dd HH:mm} UTC");
         Console.WriteLine($"Last report: {state.LastReportAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
@@ -210,20 +226,7 @@ public static class Program
 
         if (args.Contains("--manifest", StringComparer.OrdinalIgnoreCase))
         {
-            Console.WriteLine("Everything this agent reads:");
-            Console.WriteLine();
-
-            foreach ((string name, string sql) in QueryPack.LoadWindows())
-            {
-                Console.WriteLine($"  [{name}]");
-                Console.WriteLine($"  {sql}");
-                Console.WriteLine();
-            }
-
-            Console.WriteLine(
-                "Nothing else is collected. There is no query for the signed-in user, the session, "
-                + "files, browsing or network traffic.");
-            return 0;
+            return PrintManifest();
         }
 
         if (state.LastReportJson is { Length: > 0 } json)
@@ -241,6 +244,51 @@ public static class Program
         Console.WriteLine("Run 'merlin-agent status --manifest' to see every query this agent runs.");
         return 0;
     }
+
+    private static int PrintManifest()
+    {
+        Console.WriteLine($"Everything this agent reads on {AgentPlatformInfo.DisplayName}:");
+        Console.WriteLine();
+
+        foreach ((string name, string sql) in QueryPack.Load())
+        {
+            Console.WriteLine($"  [{name}]");
+            Console.WriteLine($"  {sql}");
+            Console.WriteLine();
+        }
+
+        // The supplemental readings are NOT in the query pack, so a manifest listing only the pack
+        // would understate what the agent touches — which would make this command a worse promise
+        // than no command. They are named here for the same reason the pack exists.
+        Console.WriteLine("Read outside osquery, because no table exposes them:");
+        Console.WriteLine();
+
+        foreach (string item in SupplementalManifest())
+        {
+            Console.WriteLine($"  {item}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "Nothing else is collected. There is no query for the signed-in user, the session, "
+            + "files, browsing or network traffic.");
+
+        return 0;
+    }
+
+    private static string[] SupplementalManifest() => AgentPlatformInfo.Current switch
+    {
+        AgentOs.Windows => ["net accounts — the local password and lockout policy"],
+        AgentOs.MacOs => ["pwpolicy -getaccountpolicies — the local password policy"],
+        _ =>
+        [
+            "/etc/security/pwquality.conf and /etc/login.defs — the local password policy",
+            "/sys/firmware/efi/efivars/SecureBoot-* — whether Secure Boot is enforced",
+            "/sys/class/tpm/tpm0/tpm_version_major — whether a TPM is present",
+            "the package database's modification time — when software was last installed",
+            "ufw status / firewall-cmd --state / nft list ruleset — the host firewall's state",
+        ],
+    };
 
     /// <summary>
     /// Re-points this machine at a different Merlin address.
@@ -297,8 +345,7 @@ public static class Program
 
         using (key)
         {
-            OsqueryResults results = Collect(out string? osqueryVersion);
-            AgentReportPayload payload = BuildPayload(results, osqueryVersion);
+            AgentReportPayload payload = Collect();
 
             using ReportClient client = new(server, key, Version);
 
@@ -328,6 +375,27 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// Replaces this device's signing key, authenticated by the outgoing one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The incoming key is PERSISTED, and only after Merlin has accepted it.</b> Until 0.2 it was
+    /// generated in memory, sent, and then discarded when the method returned: Merlin stored the new
+    /// public key, the agent went on signing with the old private one, and every subsequent report
+    /// was refused with the same generic message every other refusal uses. The machine went dark
+    /// with no error anyone would connect to the rotation, and only a re-enrol recovered it.
+    /// Persisting AFTER the response — never before — is what keeps a refused rotation harmless.
+    /// </para>
+    /// <para>
+    /// <b>A TPM-held key cannot be rotated by this command, and it says so rather than downgrading.</b>
+    /// The whole value of that key is that it is non-exportable and lives under one fixed container
+    /// name, so there is no way to hold the outgoing and incoming keys at once — and the obvious
+    /// shortcut, replacing it with a software key, would quietly turn the strongest evidence Merlin
+    /// holds about a machine into the weakest without anyone deciding to. Re-enrolling is the honest
+    /// path, and it produces a device row an administrator can see and reconcile.
+    /// </para>
+    /// </remarks>
     private static async Task<int> RotateAsync()
     {
         AgentStateData? state = AgentState.Read();
@@ -338,10 +406,19 @@ public static class Program
             return 1;
         }
 
-        (ECDsa outgoing, _) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
+        (ECDsa outgoing, KeyAttestation attestation) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
 
         using (outgoing)
         {
+            if (attestation == KeyAttestation.Tpm)
+            {
+                Console.Error.WriteLine(
+                    "This device's key is held in the TPM and cannot be rotated in place — it is "
+                    + "non-exportable, which is the point of it. Re-enrol the machine instead; "
+                    + "Merlin will show the new device for you to approve and reconcile.");
+                return 1;
+            }
+
             // The incoming key is generated fresh and the request is signed with the OUTGOING one.
             // That signature is the whole security of rotation: it proves the caller is the device
             // that currently holds the enrolment.
@@ -357,8 +434,17 @@ public static class Program
                 .RotateAsync(request, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
                 .ConfigureAwait(false);
 
-            Console.WriteLine(result.Detail);
-            return result.Succeeded ? 0 : 1;
+            if (!result.Succeeded)
+            {
+                Console.Error.WriteLine($"Rotation refused: {result.Detail}");
+                Console.Error.WriteLine("The existing key is unchanged and this machine keeps reporting.");
+                return 1;
+            }
+
+            DeviceKey.Replace(AgentState.SoftwareKeyPath, incoming);
+
+            Console.WriteLine("Key rotated.");
+            return 0;
         }
     }
 
@@ -375,14 +461,22 @@ public static class Program
         return 0;
     }
 
-    private static OsqueryResults Collect(out string? osqueryVersion)
+    /// <summary>
+    /// Runs the platform's query pack and folds in the readings osquery cannot take.
+    /// </summary>
+    /// <remarks>
+    /// The platform is resolved once, by <see cref="AgentPlatformInfo"/>, and used to pick the pack
+    /// and the normaliser together — so a machine can never read one platform's queries through
+    /// another's normaliser, which would produce a report that is internally consistent and wrong.
+    /// </remarks>
+    private static AgentReportPayload Collect()
     {
         string? osquery = OsqueryRunner.Locate();
+        OsqueryResults results;
+        string? osqueryVersion = null;
 
         if (osquery is null)
         {
-            osqueryVersion = null;
-
             // No osquery means no readings at all. Returning an empty result set rather than
             // throwing keeps the report shape valid: every signal becomes "not observed", which is
             // exactly what Merlin should be told, and the device still reports in so it does not
@@ -390,28 +484,28 @@ public static class Program
             Console.Error.WriteLine(
                 "osquery was not found, so no readings could be taken. The report will say so.");
 
-            return new OsqueryResults();
+            results = new OsqueryResults();
+        }
+        else
+        {
+            OsqueryRunner runner = new(osquery, TimeSpan.FromSeconds(30));
+            osqueryVersion = runner.Version();
+
+            results = runner.RunAll(
+                QueryPack.Load(),
+                (name, detail) => Console.Error.WriteLine($"  query '{name}' failed: {detail}"));
         }
 
-        OsqueryRunner runner = new(osquery, TimeSpan.FromSeconds(30));
-        osqueryVersion = runner.Version();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        return runner.RunAll(
-            QueryPack.LoadWindows(),
-            (name, detail) => Console.Error.WriteLine($"  query '{name}' failed: {detail}"));
-    }
+        AgentReportPayload payload = AgentPlatformInfo.Current switch
+        {
+            AgentOs.Windows => WindowsNormaliser.ToPayload(results, now, Version, osqueryVersion),
+            AgentOs.MacOs => MacOsNormaliser.ToPayload(results, now, Version, osqueryVersion),
+            _ => LinuxNormaliser.ToPayload(results, now, Version, osqueryVersion),
+        };
 
-    private static AgentReportPayload BuildPayload(OsqueryResults results, string? osqueryVersion)
-    {
-        AgentReportPayload payload = WindowsNormaliser.ToPayload(
-            results, DateTimeOffset.UtcNow, Version, osqueryVersion);
-
-        // Password policy is not an osquery table, so it is read separately and merged. Merging
-        // here rather than inside the normaliser keeps that function pure and platform-neutral.
-        AgentAccountsReading? accounts =
-            LocalPasswordPolicy.Read(payload.Accounts?.LocalAdministratorNames);
-
-        return payload with { Accounts = accounts ?? payload.Accounts };
+        return HostReader.Read().MergeInto(payload);
     }
 
     private static string? ArgumentValue(string[] args, string name)

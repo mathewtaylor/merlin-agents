@@ -81,11 +81,12 @@ The body announces the device's public key and hardware identity, and **is signe
 {
   "publicKey": "MFkwEwYHKoZI...",   // Base64 SPKI DER, ECDSA P-256
   "keyAttestation": "Tpm",           // or "Software"
-  "agentVersion": "0.1.0",
+  "agentVersion": "0.2.0",
+  "platform": "Windows",             // or "MacOs", "Linux"
   "hostname": "LAPTOP-MT",
   "machineGuid": "…", "serialNumber": "…", "manufacturer": "…", "model": "…",
   "chassisType": "Laptop",
-  "entraDeviceId": "…",              // null on a workgroup machine
+  "entraDeviceId": "…",              // null on a workgroup machine, and on macOS and Linux
   "entraTenantId": "…"
 }
 ```
@@ -95,18 +96,43 @@ The body announces the device's public key and hardware identity, and **is signe
 Re-enrolling with the **same public key** updates the existing device rather than creating a second
 one, so a re-run installer or a lost response cannot produce a duplicate.
 
+### `platform`
+
+Added in 0.2, and **Merlin must not infer it**. Every criterion that differs by operating system —
+which end-of-support table applies, whether an edition means anything, what "Secure Boot" names — is
+resolved from this field and nothing else.
+
+An agent older than 0.2 omits it, and Merlin reads the absence as `Unknown` rather than as
+`Windows`. The pre-0.2 agents were indeed Windows-only, so the fallback would be *correct today*;
+it is refused because encoding it makes an ageing assumption load-bearing, and the cost of the
+honest answer is one agent upgrade. A device reporting `Unknown` keeps reporting every other signal
+and shows its platform as not observed.
+
 ## `POST /api/agent/report`
 
-The posture payload. Every reading is nullable, and **`null` means NOT OBSERVED** — the agent omits
-a value it could not read rather than substituting a default. A `false` invented on the device would
-be indistinguishable, by the time it reached a control check, from a genuine observation that a
-protection is disabled.
+The posture payload, carrying `platform` alongside the readings. Every reading is nullable, and
+**`null` means NOT OBSERVED** — the agent omits a value it could not read rather than substituting a
+default. A `false` invented on the device would be indistinguishable, by the time it reached a
+control check, from a genuine observation that a protection is disabled.
+
+Three fields carry a platform-dependent meaning, and it is the same criterion in each case rather
+than three that can drift apart:
+
+| Field | Windows | macOS | Linux |
+|---|---|---|---|
+| `hardening.firewallAllProfilesEnabled` | every profile on | application firewall on | `ufw` / `firewalld` / `nftables` active |
+| `hardening.secureBootEnabled` | UEFI Secure Boot | System Integrity Protection | UEFI Secure Boot |
+| `hardening.tpmPresent` | TPM present and enabled | Apple Secure Enclave | TPM present |
 
 **202** on acceptance.
 
 ## `POST /api/agent/rotate`
 
 `{ newPublicKey, keyAttestation }`, signed with the **outgoing** key. **204** on success.
+
+The agent persists the incoming key only after this call succeeds, so a refused rotation leaves the
+machine reporting exactly as before. A TPM-held key is not rotated at all — see
+[security.md](security.md) § 2.
 
 ---
 

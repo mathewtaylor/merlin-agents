@@ -1,8 +1,8 @@
 using System.Diagnostics;
-using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Merlin.Agent.Core.Collection;
+using Merlin.Agent.Platform;
 
 namespace Merlin.Agent.Collection;
 
@@ -24,7 +24,6 @@ namespace Merlin.Agent.Collection;
 /// turns into a null reading rather than a false one.
 /// </para>
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public sealed class OsqueryRunner
 {
     private static readonly JsonSerializerOptions _json = new()
@@ -45,24 +44,62 @@ public sealed class OsqueryRunner
     }
 
     /// <summary>
-    /// Locates <c>osqueryi.exe</c>, preferring the copy installed beside the agent.
+    /// Locates <c>osqueryi</c>, preferring the copy the installer placed beside the agent.
     /// </summary>
+    /// <remarks>
+    /// <b>Beside the agent first, on every platform.</b> The installer stages its own pinned,
+    /// hash-verified copy there, and that is the one whose provenance this deployment actually
+    /// knows. The system locations are searched afterwards so a machine where an administrator
+    /// already runs osquery is not made to carry a second copy — but they are the fallback, not the
+    /// preference, because nothing pins what is in them.
+    /// </remarks>
     /// <returns>The path, or <c>null</c> when osquery is not installed.</returns>
     public static string? Locate()
     {
-        string beside = Path.Combine(AppContext.BaseDirectory, "osquery", "osqueryi.exe");
+        string executable = OperatingSystem.IsWindows() ? "osqueryi.exe" : "osqueryi";
+        string beside = Path.Combine(AppContext.BaseDirectory, "osquery", executable);
 
         if (File.Exists(beside))
         {
             return beside;
         }
 
-        string programFiles = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            "osquery",
-            "osqueryi.exe");
+        foreach (string candidate in SystemLocations(executable))
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
 
-        return File.Exists(programFiles) ? programFiles : null;
+        return null;
+    }
+
+    private static IEnumerable<string> SystemLocations(string executable)
+    {
+        switch (AgentPlatformInfo.Current)
+        {
+            case AgentOs.Windows:
+                yield return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                    "osquery",
+                    executable);
+                break;
+
+            case AgentOs.MacOs:
+                // The official package installs an app bundle, so the binary is not on PATH and is
+                // several levels below the directory an administrator would think to look in.
+                yield return "/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryi";
+                yield return "/usr/local/bin/osqueryi";
+                yield return "/opt/homebrew/bin/osqueryi";
+                break;
+
+            default:
+                yield return "/usr/bin/osqueryi";
+                yield return "/opt/osquery/bin/osqueryi";
+                yield return "/usr/local/bin/osqueryi";
+                break;
+        }
     }
 
     /// <summary>Reads the installed osquery version, or <c>null</c>.</summary>

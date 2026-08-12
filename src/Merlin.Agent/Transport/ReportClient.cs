@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Http.Headers;
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -33,7 +32,6 @@ public sealed record TransportResult(bool Succeeded, string Detail, DateTimeOffs
 /// next run starts correct.
 /// </para>
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public sealed class ReportClient : IDisposable
 {
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web)

@@ -2,12 +2,15 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <!-- net10.0-windows, not net10.0: CngKey and the registry reads are Windows-only, and the
-         platform-specific TFM is what lets the compiler prove it rather than emitting CA1416
-         warnings the build would then have to suppress. The platform-NEUTRAL half of the agent
-         (signing envelope, normalisation, wire contracts) lives in Merlin.Agent.Core so it stays
-         testable on any machine and so a macOS or Linux agent can reuse it unchanged. -->
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- net10.0, NOT net10.0-windows. The agent now ships for Windows, macOS and Linux from one
+         source tree, so a platform-specific TFM would exclude two of the three targets outright.
+         The Windows-only APIs (CngKey for the TPM, DPAPI for the software key, `net accounts`)
+         are annotated [SupportedOSPlatform("windows")] and reached only through
+         OperatingSystem.IsWindows() guards, which is what keeps CA1416 satisfied without the
+         platform TFM — and, more usefully, forces every such call to be visibly guarded rather
+         than silently compiled for one target. The platform-NEUTRAL half (signing envelope,
+         normalisation, wire contracts) still lives in Merlin.Agent.Core. -->
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Merlin.Agent</RootNamespace>
     <AssemblyName>merlin-agent</AssemblyName>
     <PublishAot>true</PublishAot>
@@ -20,14 +23,23 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- DPAPI, for the software-key fallback on machines with no usable TPM. Not in the shared
-         framework; the package is AOT-compatible. -->
+    <!-- DPAPI, for the software-key fallback on Windows machines with no usable TPM. Not in the
+         shared framework; the package is AOT-compatible. It resolves on every target and throws
+         only if called off Windows, which the platform guard prevents. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>
+    <!-- EVERY pack travels with EVERY build, not just the matching one. The manifest option on
+         `merlin-agent status` is what an employee runs to see what the agent reads, and a package
+         carrying only its own platform's manifest could not answer that question about the fleet
+         it belongs to. They are a few kilobytes in total. -->
     <None Include="..\..\packaging\queries\windows.json" CopyToOutputDirectory="PreserveNewest"
           Link="queries\windows.json" />
+    <None Include="..\..\packaging\queries\macos.json" CopyToOutputDirectory="PreserveNewest"
+          Link="queries\macos.json" />
+    <None Include="..\..\packaging\queries\linux.json" CopyToOutputDirectory="PreserveNewest"
+          Link="queries\linux.json" />
   </ItemGroup>
 
 </Project>

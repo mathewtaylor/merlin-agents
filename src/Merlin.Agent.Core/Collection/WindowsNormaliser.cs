@@ -1,68 +1,10 @@
-using System.Globalization;
 using Merlin.Agent.Core.Contracts;
+using static Merlin.Agent.Core.Collection.ReadingParsers;
 
 namespace Merlin.Agent.Core.Collection;
 
 /// <summary>
-/// One osquery result set — the rows a named query returned, as string columns.
-/// </summary>
-/// <remarks>
-/// Deliberately untyped. osquery returns every column as a JSON string on Windows, and the value of
-/// keeping the raw shape here is that <see cref="WindowsNormaliser"/> becomes a pure function of it,
-/// testable without osquery, without Windows and without a network.
-/// </remarks>
-public sealed class OsqueryResults
-{
-    private readonly Dictionary<string, IReadOnlyList<Dictionary<string, string>>> _sets =
-        new(StringComparer.Ordinal);
-
-    /// <summary>Records the rows a named query returned.</summary>
-    /// <param name="queryName">The manifest query name.</param>
-    /// <param name="rows">Its rows.</param>
-    public void Add(string queryName, IReadOnlyList<Dictionary<string, string>> rows) =>
-        _sets[queryName] = rows;
-
-    /// <summary>
-    /// The rows a named query returned, or an EMPTY list when it did not run or failed.
-    /// </summary>
-    /// <remarks>
-    /// Empty rather than throwing: a query that could not run must degrade to a null reading, not
-    /// take down the whole collection. A machine where one table is unavailable still has fifteen
-    /// other readings worth sending.
-    /// </remarks>
-    /// <param name="queryName">The manifest query name.</param>
-    /// <returns>The rows.</returns>
-    public IReadOnlyList<Dictionary<string, string>> Rows(string queryName) =>
-        _sets.TryGetValue(queryName, out IReadOnlyList<Dictionary<string, string>>? rows) ? rows : [];
-
-    /// <summary>The first row of a named query, or <c>null</c>.</summary>
-    /// <param name="queryName">The manifest query name.</param>
-    /// <returns>The first row, or null.</returns>
-    public Dictionary<string, string>? First(string queryName)
-    {
-        IReadOnlyList<Dictionary<string, string>> rows = Rows(queryName);
-        return rows.Count == 0 ? null : rows[0];
-    }
-
-    /// <summary>Reads one column from the first row, or <c>null</c>.</summary>
-    /// <param name="queryName">The manifest query name.</param>
-    /// <param name="column">The column.</param>
-    /// <returns>The value, or null when absent or blank.</returns>
-    public string? Value(string queryName, string column)
-    {
-        Dictionary<string, string>? row = First(queryName);
-
-        if (row is null || !row.TryGetValue(column, out string? value))
-        {
-            return null;
-        }
-
-        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-    }
-}
-
-/// <summary>
-/// Turns osquery result sets into the wire payload.
+/// Turns Windows osquery result sets into the wire payload.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -100,6 +42,7 @@ public static class WindowsNormaliser
             CollectedAt: collectedAt,
             AgentVersion: agentVersion,
             OsqueryVersion: osqueryVersion,
+            Platform: AgentPlatform.Windows,
             Hostname: results.Value("system_info", "hostname") ?? Environment.MachineName,
             MachineGuid: results.Value("machine_guid", "data"),
             SerialNumber: results.Value("system_info", "hardware_serial"),
@@ -112,7 +55,8 @@ public static class WindowsNormaliser
                 results.Value("os_version", "name"),
                 results.Value("os_version", "version"),
                 results.Value("os_version", "build"),
-                edition),
+                edition,
+                Distribution: null),
             Encryption: Volumes(results, edition),
             AntiMalware: AntiMalware(results),
             Hardening: Hardening(results),
@@ -330,16 +274,7 @@ public static class WindowsNormaliser
 
     private static AgentAccountsReading? Accounts(OsqueryResults results)
     {
-        IReadOnlyList<Dictionary<string, string>> rows = results.Rows("local_admins");
-
-        List<string>? admins = rows.Count == 0
-            ? null
-            : [.. rows
-                .Select(row => Column(row, "username"))
-                .Where(name => !string.IsNullOrWhiteSpace(name))
-                .Select(name => name!)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Order(StringComparer.OrdinalIgnoreCase)];
+        IReadOnlyList<string>? admins = AccountNames(results.Rows("local_admins"), "username");
 
         // Password policy is filled in by the Windows collector from `net accounts`, not by osquery,
         // which has no table for the local SAM policy. Left null here and merged afterwards.
@@ -371,55 +306,4 @@ public static class WindowsNormaliser
         "17" or "23" or "28" or "29" => "Server",
         _ => null,
     };
-
-    private static string? Column(Dictionary<string, string> row, string column) =>
-        row.TryGetValue(column, out string? value) && !string.IsNullOrWhiteSpace(value)
-            ? value.Trim()
-            : null;
-
-    private static int? ParseInt(string? value) =>
-        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
-            ? parsed
-            : null;
-
-    private static long? ParseLong(string? value) =>
-        long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed)
-            ? parsed
-            : null;
-
-    private static bool? ParseBool(string? value) => value?.Trim().ToUpperInvariant() switch
-    {
-        "1" or "TRUE" or "YES" or "ON" => true,
-        "0" or "FALSE" or "NO" or "OFF" => false,
-        _ => null,
-    };
-
-    /// <summary>
-    /// Parses an osquery date, which is a Unix epoch on some tables and a formatted date on others.
-    /// </summary>
-    private static DateTimeOffset? ParseDate(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long epoch)
-            && epoch > 0)
-        {
-            try
-            {
-                return DateTimeOffset.FromUnixTimeSeconds(epoch);
-            }
-            catch (ArgumentOutOfRangeException)
-            {
-                return null;
-            }
-        }
-
-        return DateTimeOffset.TryParse(
-            value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed)
-            ? parsed
-            : null;
-    }
 }
