@@ -1,5 +1,5 @@
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
+using Merlin.Agent.Platform;
 
 namespace Merlin.Agent.Crypto;
 
@@ -9,7 +9,10 @@ public enum KeyAttestation
     /// <summary>Held in the machine's TPM and non-exportable.</summary>
     Tpm,
 
-    /// <summary>Held in software, protected at rest by DPAPI under the machine key.</summary>
+    /// <summary>
+    /// Held in software — protected at rest by DPAPI on Windows, and by file permissions on macOS
+    /// and Linux.
+    /// </summary>
     Software,
 }
 
@@ -19,12 +22,22 @@ public enum KeyAttestation
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>TPM first, software second, and the report says which.</b> A TPM-held key is created with
-/// <see cref="CngExportPolicies.None"/> inside the platform crypto provider, so it cannot be
-/// extracted even by an administrator on this machine: a report signed with it provably came from
-/// this physical device. A software key can be copied and used from anywhere, which is materially
-/// weaker evidence — so the attestation travels with every enrolment and Merlin shows it beside the
-/// device rather than quietly treating both the same.
+/// <b>Hardware first where the platform offers it, software second, and the report says which.</b> A
+/// TPM-held key cannot be extracted even by an administrator on that machine, so a report signed
+/// with it provably came from that physical device. A software key can be copied and used from
+/// anywhere, which is materially weaker evidence — so the attestation travels with every enrolment
+/// and Merlin shows it beside the device rather than quietly treating both the same.
+/// </para>
+/// <para>
+/// <b>Only Windows currently reaches the hardware path, and that is an honest limitation rather
+/// than a claim about the hardware.</b> Apple silicon has a Secure Enclave and most Linux machines
+/// have a TPM 2.0, and both can hold a non-exportable P-256 key — but reaching them means
+/// P/Invoking Security.framework and speaking to <c>/dev/tpmrm0</c> respectively, neither of which
+/// .NET exposes. Until then those platforms report <see cref="KeyAttestation.Software"/>, which is
+/// the truth about where the key is held. <b>Do not report <c>Tpm</c> on the strength of the
+/// hardware existing</b>: the attestation is a statement about the key, and a Mac reporting Tpm
+/// while holding its key in a file would be exactly the unearned assurance this whole module
+/// refuses. Merlin surfaces the difference; see <c>docs/security.md</c>.
 /// </para>
 /// <para>
 /// <b>The fallback is not optional.</b> The customer this agent is built for runs consumer hardware,
@@ -35,17 +48,11 @@ public enum KeyAttestation
 /// <para>
 /// <b>What this does NOT protect against.</b> The key proves provenance, not truth. A local
 /// administrator can modify this agent and have it sign whatever they like; a TPM stops the key
-/// being stolen and used elsewhere, not the legitimate holder lying. See <c>docs/security.md</c>.
+/// being stolen and used elsewhere, not the legitimate holder lying.
 /// </para>
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public static class DeviceKey
 {
-    /// <summary>The CNG key container name. Changing it orphans an enrolled device's key.</summary>
-    public const string KeyName = "Merlin.Agent.DeviceKey";
-
-    private const string PlatformProvider = "Microsoft Platform Crypto Provider";
-
     /// <summary>
     /// Opens the existing device key, or creates one if this machine has never enrolled.
     /// </summary>
@@ -55,48 +62,52 @@ public static class DeviceKey
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(softwareKeyPath);
 
-        if (TryOpenTpm(out ECDsa? existing))
-        {
-            return (existing!, KeyAttestation.Tpm);
-        }
-
-        if (File.Exists(softwareKeyPath))
-        {
-            return (LoadSoftware(softwareKeyPath), KeyAttestation.Software);
-        }
-
-        if (TryCreateTpm(out ECDsa? created))
-        {
-            return (created!, KeyAttestation.Tpm);
-        }
-
-        return (CreateSoftware(softwareKeyPath), KeyAttestation.Software);
+        return OperatingSystem.IsWindows()
+            ? WindowsDeviceKey.OpenOrCreate(softwareKeyPath)
+            : (UnixDeviceKey.OpenOrCreate(softwareKeyPath), KeyAttestation.Software);
     }
 
     /// <summary>Deletes the device key, so the machine can enrol afresh.</summary>
     /// <param name="softwareKeyPath">Where a software-held key is stored.</param>
     public static void Delete(string softwareKeyPath)
     {
-        try
+        ArgumentException.ThrowIfNullOrWhiteSpace(softwareKeyPath);
+
+        if (OperatingSystem.IsWindows())
         {
-            if (CngKey.Exists(KeyName, new CngProvider(PlatformProvider), CngKeyOpenOptions.MachineKey))
-            {
-                using CngKey key = CngKey.Open(
-                    KeyName, new CngProvider(PlatformProvider), CngKeyOpenOptions.MachineKey);
-                key.Delete();
-            }
-        }
-        catch (CryptographicException)
-        {
-            // A key that cannot be opened cannot be deleted either, and there is nothing useful to
-            // do about it here: uninstall continues, and re-enrolling produces a new device row for
-            // an administrator to reconcile.
+            WindowsDeviceKey.DeleteHardwareKey();
         }
 
         if (File.Exists(softwareKeyPath))
         {
             File.Delete(softwareKeyPath);
         }
+    }
+
+    /// <summary>
+    /// Replaces the stored software key with a freshly rotated one.
+    /// </summary>
+    /// <remarks>
+    /// <b>Called only AFTER Merlin has accepted the rotation.</b> Writing first would mean a refused
+    /// rotation left the machine holding a key the server has never seen, which is the same dark
+    /// device the old in-memory-only rotation produced — just reached from the other direction.
+    /// Only reachable for a software-held key; a TPM key is refused earlier, because it cannot be
+    /// replaced without downgrading the attestation.
+    /// </remarks>
+    /// <param name="softwareKeyPath">Where the software-held key is stored.</param>
+    /// <param name="incoming">The newly generated key.</param>
+    public static void Replace(string softwareKeyPath, ECDsa incoming)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(softwareKeyPath);
+        ArgumentNullException.ThrowIfNull(incoming);
+
+        if (OperatingSystem.IsWindows())
+        {
+            WindowsDeviceKey.WriteSoftwareKey(softwareKeyPath, incoming);
+            return;
+        }
+
+        UnixDeviceKey.Write(softwareKeyPath, incoming);
     }
 
     /// <summary>The Base64 SPKI DER public key, which is the device's real identity.</summary>
@@ -122,92 +133,34 @@ public static class DeviceKey
         return Convert.ToBase64String(signature);
     }
 
-    private static bool TryOpenTpm(out ECDsa? key)
+    /// <summary>
+    /// A sentence describing where the key is held, shown at enrolment.
+    /// </summary>
+    /// <remarks>
+    /// Platform-specific because the reason for a software key differs: on Windows it means no
+    /// usable TPM was found, which is a fact about that machine; on macOS and Linux it means this
+    /// agent has no hardware key store yet, which is a fact about the agent. Telling a Mac owner
+    /// their hardware lacks a secure element would be false.
+    /// </remarks>
+    /// <param name="attestation">How the key is held.</param>
+    /// <returns>The explanation, or <c>null</c> when the key is in hardware.</returns>
+    public static string? ExplainAttestation(KeyAttestation attestation)
     {
-        key = null;
-
-        try
+        if (attestation == KeyAttestation.Tpm)
         {
-            if (!CngKey.Exists(KeyName, new CngProvider(PlatformProvider), CngKeyOpenOptions.MachineKey))
-            {
-                return false;
-            }
-
-            CngKey handle = CngKey.Open(
-                KeyName, new CngProvider(PlatformProvider), CngKeyOpenOptions.MachineKey);
-
-            key = new ECDsaCng(handle);
-            return true;
+            return null;
         }
-        catch (CryptographicException)
+
+        return AgentPlatformInfo.Current switch
         {
-            return false;
-        }
-        catch (PlatformNotSupportedException)
-        {
-            return false;
-        }
-    }
-
-    private static bool TryCreateTpm(out ECDsa? key)
-    {
-        key = null;
-
-        try
-        {
-            CngKeyCreationParameters parameters = new()
-            {
-                Provider = new CngProvider(PlatformProvider),
-
-                // Non-exportable is the entire point: it is what makes a signature evidence about
-                // THIS machine rather than about whoever holds a copied key.
-                ExportPolicy = CngExportPolicies.None,
-
-                // Machine scope, because the agent runs as SYSTEM from a scheduled task and no user
-                // profile is loaded.
-                KeyCreationOptions = CngKeyCreationOptions.MachineKey,
-            };
-
-            CngKey handle = CngKey.Create(CngAlgorithm.ECDsaP256, KeyName, parameters);
-            key = new ECDsaCng(handle);
-            return true;
-        }
-        catch (CryptographicException)
-        {
-            // No TPM, a TPM that is not ready, or a provider that refuses the request. All of them
-            // mean the same thing here: fall back and report the weaker attestation honestly.
-            return false;
-        }
-        catch (PlatformNotSupportedException)
-        {
-            return false;
-        }
-    }
-
-    private static ECDsa CreateSoftware(string path)
-    {
-        ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        byte[] pkcs8 = key.ExportPkcs8PrivateKey();
-
-        // DPAPI machine scope: readable by this machine only, and by SYSTEM without a user profile.
-        byte[] protectedKey = ProtectedData.Protect(pkcs8, optionalEntropy: null, DataProtectionScope.LocalMachine);
-        CryptographicOperations.ZeroMemory(pkcs8);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllBytes(path, protectedKey);
-
-        return key;
-    }
-
-    private static ECDsa LoadSoftware(string path)
-    {
-        byte[] pkcs8 = ProtectedData.Unprotect(
-            File.ReadAllBytes(path), optionalEntropy: null, DataProtectionScope.LocalMachine);
-
-        ECDsa key = ECDsa.Create();
-        key.ImportPkcs8PrivateKey(pkcs8, out _);
-        CryptographicOperations.ZeroMemory(pkcs8);
-
-        return key;
+            AgentOs.Windows =>
+                "  No usable TPM was found, so the key is held in software. Merlin records this and "
+                + "shows it against the device: a software key is weaker evidence because it can be "
+                + "copied.",
+            _ =>
+                "  The key is held in a root-only file. This agent does not yet use the Secure "
+                + "Enclave or a TPM on this platform, so the key could in principle be copied by "
+                + "anyone with root. Merlin records this and shows it against the device.",
+        };
     }
 }

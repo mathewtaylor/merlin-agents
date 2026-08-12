@@ -1,0 +1,93 @@
+{
+  "$comment": [
+    "The Merlin Agent macOS collection manifest.",
+    "",
+    "THIS FILE IS THE COMPLETE LIST OF WHAT THE AGENT READS ON macOS. Every query below runs",
+    "through osqueryi and nothing else is collected. An administrator can paste any of them into",
+    "osqueryi on their own Mac and get byte-identical output — which is a far stronger assurance",
+    "than reading the agent's source, and is the main reason collection is delegated to osquery",
+    "rather than hand-rolled.",
+    "",
+    "NOTHING HERE READS WHO IS SIGNED IN. There is no query for the console user, the session or",
+    "any mail address. The `screenlock` query is the one place a per-user setting is even nearby,",
+    "and osquery resolves it internally without ever returning a username — see its own comment.",
+    "",
+    "macOS EXPOSES LESS AT MACHINE SCOPE THAN WINDOWS DOES, and the gaps are left as gaps. The",
+    "screen-lock idle interval, patch currency and antimalware signature age have no machine-wide",
+    "source on a Mac without an MDM, so they are not collected and Merlin reports them as not",
+    "observed. A query that guessed at them would be worse than the silence.",
+    "",
+    "A query that fails or returns nothing produces a NULL reading, never a false one. Merlin",
+    "treats null as 'not observed' and will not raise a nonconformity from it."
+  ],
+  "version": 1,
+  "queries": {
+    "system_info": {
+      "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model, cpu_brand FROM system_info;",
+      "purpose": "Machine identity, the serial used to reconcile against the asset register, and the CPU brand that establishes whether this Mac has a Secure Enclave."
+    },
+    "os_version": {
+      "sql": "SELECT name, version, build, platform FROM os_version;",
+      "purpose": "macOS name, version and build — what end-of-support is judged against."
+    },
+    "filevault": {
+      "$comment": [
+        "A PRIVACY-CRITICAL QUERY. The disk_encryption table also carries `uid` and `user_uuid` —",
+        "'currently authenticated user if available' — which identify the person who unlocked the",
+        "volume. This query names exactly the columns it wants, so those are never returned to the",
+        "agent at all: the restriction is enforced by the query rather than by the agent",
+        "remembering to ignore them, the same way the Windows pack restricts the Entra join info.",
+        "",
+        "NOT JOINED TO mounts, deliberately. Scoping to the root volume reads better but does not",
+        "survive contact with modern macOS: the system volume is a sealed snapshot (disk3s1s1)",
+        "while the data volume is separate (disk3s5), so a join on the mounted device matches",
+        "nothing on an APFS Mac and every machine would report encryption as 'not observed'.",
+        "FileVault is a whole-machine setting, so the normaliser reduces all rows to one",
+        "machine-level answer instead."
+      ],
+      "sql": "SELECT name, encrypted, encryption_status, filevault_status, type FROM disk_encryption;",
+      "purpose": "Whether this Mac is protected by FileVault (A.8.24)."
+    },
+    "gatekeeper": {
+      "sql": "SELECT assessments_enabled FROM gatekeeper;",
+      "purpose": "Whether Gatekeeper refuses unsigned and un-notarised code — macOS's malware-prevention control (A.8.7). Signature currency is NOT collected: XProtect updates through a channel with no locally readable 'current' version to compare against."
+    },
+    "alf": {
+      "sql": "SELECT global_state FROM alf;",
+      "purpose": "The macOS application firewall. 0 is off; 1 and 2 are both on, differing only in strictness."
+    },
+    "sip": {
+      "sql": "SELECT enabled FROM sip_config WHERE config_flag = 'sip';",
+      "purpose": "System Integrity Protection — macOS's verified-boot equivalent, reported as the Secure Boot signal."
+    },
+    "screenlock": {
+      "$comment": [
+        "THE PRIVACY-SENSITIVE QUERY. Whether the screen requires a password is a per-user",
+        "preference, and osquery resolves the console user's setting internally — this table",
+        "returns only `enabled` and `grace_period`, with no username, uid or session in its",
+        "output. The agent therefore never handles an identity even though the value originates",
+        "in a user's own domain.",
+        "",
+        "grace_period IS COLLECTED BUT NOT REPORTED AS THE LOCK TIMEOUT. It is the delay after",
+        "the screensaver starts, not the idle time before it does, so sending it as the timeout",
+        "would understate a machine's exposure. It appears here so the manifest matches what the",
+        "query actually returns."
+      ],
+      "sql": "SELECT enabled, grace_period FROM screenlock;",
+      "purpose": "Whether unlocking this Mac requires a password (A.7.7 clear screen). Expect NO ROWS in normal operation: osquery reads this from the current logged-in user context, and the agent runs as root from a launch daemon which has none. That is why Merlin usually shows this signal as not observed on a Mac."
+    },
+    "local_admins": {
+      "$comment": [
+        "Returns LOCAL ACCOUNT names, not the identity of whoever is signed in. A.8.2 is",
+        "materially weaker without them: a count says there are four administrators but not that",
+        "one of them is unexpected."
+      ],
+      "sql": "SELECT u.username FROM users u JOIN user_groups ug ON u.uid = ug.uid JOIN groups g ON ug.gid = g.gid WHERE g.groupname = 'admin';",
+      "purpose": "Local accounts holding administrator rights (A.8.2)."
+    },
+    "system_volume": {
+      "sql": "SELECT blocks, blocks_available, blocks_size FROM mounts WHERE path = '/';",
+      "purpose": "Free space on the system volume (A.8.6 capacity)."
+    }
+  }
+}

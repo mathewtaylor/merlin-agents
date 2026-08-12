@@ -1,6 +1,6 @@
-using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Merlin.Agent.Platform;
 
 namespace Merlin.Agent.Collection;
 
@@ -9,27 +9,35 @@ namespace Merlin.Agent.Collection;
 /// </summary>
 /// <remarks>
 /// <b>The manifest ships as data, not code, on purpose.</b> An administrator can open
-/// <c>queries/windows.json</c>, read every query, paste any of them into <c>osqueryi</c> and get
-/// identical output. That is a far stronger assurance than "read our source and trust it", and it is
-/// the main reason collection is delegated to osquery at all. Adding a platform means adding a pack,
-/// not changing this loader.
+/// <c>queries/&lt;platform&gt;.json</c>, read every query, paste any of them into <c>osqueryi</c>
+/// and get identical output. That is a far stronger assurance than "read our source and trust it",
+/// and it is the main reason collection is delegated to osquery at all. Adding a platform means
+/// adding a pack and a normaliser, not changing this loader.
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public static class QueryPack
 {
-    /// <summary>Loads the Windows manifest from beside the executable.</summary>
+    /// <summary>Loads the manifest for the platform this agent is running on.</summary>
     /// <returns>Query name to SQL, in manifest order.</returns>
     /// <exception cref="FileNotFoundException">When the manifest is missing.</exception>
     /// <exception cref="InvalidOperationException">When the manifest cannot be parsed.</exception>
-    public static IReadOnlyDictionary<string, string> LoadWindows()
+    public static IReadOnlyDictionary<string, string> Load() => Load(AgentPlatformInfo.QueryPackName);
+
+    /// <summary>Loads a named manifest from beside the executable.</summary>
+    /// <param name="fileName">The manifest file name, e.g. <c>macos.json</c>.</param>
+    /// <returns>Query name to SQL, in manifest order.</returns>
+    /// <exception cref="FileNotFoundException">When the manifest is missing.</exception>
+    /// <exception cref="InvalidOperationException">When the manifest cannot be parsed.</exception>
+    public static IReadOnlyDictionary<string, string> Load(string fileName)
     {
-        string path = Path.Combine(AppContext.BaseDirectory, "queries", "windows.json");
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+
+        string path = Path.Combine(AppContext.BaseDirectory, "queries", fileName);
 
         if (!File.Exists(path))
         {
             throw new FileNotFoundException(
-                "The collection manifest is missing. The agent will not invent queries to run in its "
-                + "absence — reinstall so that queries/windows.json sits beside the executable.",
+                $"The collection manifest is missing. The agent will not invent queries to run in "
+                + $"its absence — reinstall so that queries/{fileName} sits beside the executable.",
                 path);
         }
 

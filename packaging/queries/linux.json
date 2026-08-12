@@ -1,0 +1,82 @@
+{
+  "$comment": [
+    "The Merlin Agent Linux collection manifest.",
+    "",
+    "THIS FILE IS THE COMPLETE LIST OF WHAT THE AGENT READS THROUGH osquery ON LINUX. Every query",
+    "below runs through osqueryi and nothing else is queried. An administrator can paste any of",
+    "them into osqueryi on their own machine and get byte-identical output.",
+    "",
+    "LINUX ALSO READS FOUR THINGS FROM THE FILESYSTEM, because osquery has no table for them:",
+    "  /sys/firmware/efi/efivars/SecureBoot-*   — whether Secure Boot is enforced",
+    "  /sys/class/tpm/tpm0/tpm_version_major    — whether a TPM is present, and its version",
+    "  /etc/login.defs, /etc/security/pwquality.conf — the local password policy",
+    "  the package database's modification time — when software was last installed",
+    "plus the host firewall's own status command (ufw, firewall-cmd, or nft). Those five are",
+    "listed in docs/collection-manifest.md and are read with no shell interpolation of any kind.",
+    "",
+    "NOTHING HERE READS WHO IS SIGNED IN. There is no query for the logged-in user, the session,",
+    "the tty or any mail address. The two account queries return LOCAL ACCOUNT names, which are",
+    "machine configuration — see their own comments.",
+    "",
+    "A query that fails or returns nothing produces a NULL reading, never a false one. Merlin",
+    "treats null as 'not observed' and will not raise a nonconformity from it."
+  ],
+  "version": 1,
+  "queries": {
+    "system_info": {
+      "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model, cpu_brand FROM system_info;",
+      "purpose": "Machine identity, and the serial used to reconcile against the asset register."
+    },
+    "os_version": {
+      "$comment": [
+        "`platform` is the stable distribution id — ubuntu, debian, rhel, fedora — and is what",
+        "Merlin's end-of-life table keys on. `name` is the marketing name, which a release can",
+        "restyle; both travel so the display value and the lookup value cannot drift."
+      ],
+      "sql": "SELECT name, version, build, platform, platform_like FROM os_version;",
+      "purpose": "Distribution, version and id — what end-of-support is judged against."
+    },
+    "kernel": {
+      "sql": "SELECT version FROM kernel_info;",
+      "purpose": "Running kernel release, reported as the build so a machine pending a reboot after a kernel update is visible."
+    },
+    "disk_encryption": {
+      "$comment": [
+        "A PRIVACY-CRITICAL QUERY. The disk_encryption table also carries `uid` and `user_uuid` —",
+        "'currently authenticated user if available' — which identify the person who unlocked the",
+        "volume. This query names exactly the columns it wants, so those are never returned to the",
+        "agent at all: the restriction is enforced by the query rather than by the agent",
+        "remembering to ignore them.",
+        "",
+        "Reported to Merlin as ONE machine-level reading, not per volume. A fully encrypted Linux",
+        "install still has an unencrypted /boot — that is how the scheme works — so passing the",
+        "raw rows into Merlin's weakest-volume-wins reduction would report every correctly",
+        "encrypted machine as unencrypted. See LinuxNormaliser for the trade this makes."
+      ],
+      "sql": "SELECT name, encrypted, type FROM disk_encryption;",
+      "purpose": "Whether any block device is protected by LUKS (A.8.24)."
+    },
+    "local_admins": {
+      "$comment": [
+        "Returns LOCAL ACCOUNT names, not the identity of whoever is signed in. Linux has no",
+        "single administrators group, so all three conventional names are matched — a machine",
+        "using `wheel` and one using `sudo` must not read differently."
+      ],
+      "sql": "SELECT u.username FROM users u JOIN user_groups ug ON u.uid = ug.uid JOIN groups g ON ug.gid = g.gid WHERE g.groupname IN ('sudo', 'wheel', 'admin');",
+      "purpose": "Local accounts holding administrative rights through group membership (A.8.2)."
+    },
+    "root_accounts": {
+      "$comment": [
+        "Collected SEPARATELY from the group query and unioned with it. An account with uid 0 has",
+        "root's rights without being in any administrators group, and it is the more serious of",
+        "the two findings — reading only the group query would let it go uncounted."
+      ],
+      "sql": "SELECT username FROM users WHERE uid = 0;",
+      "purpose": "Accounts holding uid 0 (A.8.2)."
+    },
+    "system_volume": {
+      "sql": "SELECT blocks, blocks_available, blocks_size FROM mounts WHERE path = '/';",
+      "purpose": "Free space on the root filesystem (A.8.6 capacity)."
+    }
+  }
+}

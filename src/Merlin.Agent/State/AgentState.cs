@@ -1,6 +1,6 @@
-using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Merlin.Agent.Platform;
 
 namespace Merlin.Agent.State;
 
@@ -9,7 +9,7 @@ namespace Merlin.Agent.State;
 /// </summary>
 /// <remarks>
 /// Deliberately tiny. It holds no secret — the signing key lives in the TPM or in a separately
-/// DPAPI-protected file — so this file can be read by anyone curious about what the agent is doing,
+/// protected file — so this file can be read by anyone curious about what the agent is doing,
 /// which is the point.
 /// </remarks>
 /// <param name="ServerUrl">The Merlin deployment this machine reports to.</param>
@@ -46,26 +46,30 @@ public sealed record AgentStateData(
 /// asymmetry is why the two are stored separately.
 /// </para>
 /// </remarks>
-[SupportedOSPlatform("windows")]
 public static class AgentState
 {
-    private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web)
+    /// <summary>
+    /// The directory the agent keeps its state in — each platform's own convention.
+    /// </summary>
+    /// <remarks>
+    /// <b>Hard-coded per platform rather than taken from <c>SpecialFolder.CommonApplicationData</c>,
+    /// which resolves to <c>/usr/share</c> on both Unix targets.</b> That is a package-managed
+    /// directory the agent has no business writing device keys into, and on a machine where it
+    /// happened to be writable the state would sit somewhere no administrator would think to look.
+    /// </remarks>
+    public static string Directory => AgentPlatformInfo.Current switch
     {
-        WriteIndented = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        TypeInfoResolver = AgentStateJsonContext.Default,
-    };
-
-    /// <summary>The directory the agent keeps its state in.</summary>
-    public static string Directory =>
-        Path.Combine(
+        AgentOs.Windows => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Merlin Agent");
+            "Merlin Agent"),
+        AgentOs.MacOs => "/Library/Application Support/Merlin Agent",
+        _ => "/var/lib/merlin-agent",
+    };
 
     /// <summary>The state file path.</summary>
     public static string StatePath => Path.Combine(Directory, "state.json");
 
-    /// <summary>The software-key file path, used only when this machine has no usable TPM.</summary>
+    /// <summary>The software-key file path, used where no hardware key store is available.</summary>
     public static string SoftwareKeyPath => Path.Combine(Directory, "device.key");
 
     /// <summary>Reads the state, or <c>null</c> when this machine has not enrolled.</summary>
@@ -95,7 +99,7 @@ public static class AgentState
     {
         ArgumentNullException.ThrowIfNull(state);
 
-        System.IO.Directory.CreateDirectory(Directory);
+        EnsureDirectory();
 
         // Written to a temporary file and moved into place, so an interrupted write cannot leave a
         // half-written state file behind.
@@ -111,6 +115,30 @@ public static class AgentState
         {
             File.Delete(StatePath);
         }
+    }
+
+    /// <summary>
+    /// Creates the state directory, restricting it to the superuser on Unix.
+    /// </summary>
+    /// <remarks>
+    /// <b>The mode is what protects the software key on macOS and Linux</b>, where there is no DPAPI
+    /// equivalent to encrypt it with. <c>0700</c> on the directory and <c>0600</c> on the key file
+    /// means only root can read it — and the agent already runs as root, so anything that could
+    /// bypass the mode could equally read the process's memory. The honest statement is in
+    /// <c>docs/security.md</c>: on those platforms the key is protected by file permissions rather
+    /// than by encryption at rest.
+    /// </remarks>
+    public static void EnsureDirectory()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            System.IO.Directory.CreateDirectory(Directory);
+            return;
+        }
+
+        System.IO.Directory.CreateDirectory(
+            Directory,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
     }
 }
 
