@@ -34,8 +34,20 @@ jobs:
   # shippable binary is produced on a runner of that architecture. Publishing from a developer
   # machine is not possible and is not meant to be.
   #
-  # The matrix is the fleet this product actually meets: Windows and Intel/Apple-silicon Macs on
-  # the desk, x64 and arm64 Linux on the servers and the cheap boxes.
+  # The matrix is the fleet this product actually meets: Windows and Apple-silicon Macs on the
+  # desk, x64 and arm64 Linux on the servers and the cheap boxes.
+  #
+  # INTEL MACS (osx-x64) ARE NOT BUILT, and that is a capacity fact rather than a decision about
+  # the platform. NativeAOT cannot be cross-compiled, so an Intel binary needs an Intel runner;
+  # macos-13 was the last GitHub-hosted Intel image and it no longer picks jobs up — the entry sat
+  # queued for forty minutes without ever starting, which matters more than it sounds because
+  # `release` needs the WHOLE matrix: one job that never starts publishes nothing at all, rather
+  # than publishing the four that built. So the entry is removed rather than left to hang.
+  #
+  # Nothing downstream breaks. Merlin serves an install command only for platforms it has a pinned
+  # hash for and refuses the rest, so an Intel Mac is simply not offered — the same posture as any
+  # unconfigured platform. Restoring it needs a self-hosted Intel runner; put the entry back and
+  # nothing else changes.
   package:
     strategy:
       fail-fast: false
@@ -46,12 +58,6 @@ jobs:
             archive: zip
           - runner: macos-15
             rid: osx-arm64
-            archive: tar
-          # macos-13 is the last Intel-hosted image GitHub offers. When it goes, Intel Macs need a
-          # self-hosted runner or the osx-x64 package stops being published — it CANNOT be built on
-          # an arm64 runner.
-          - runner: macos-13
-            rid: osx-x64
             archive: tar
           - runner: ubuntu-latest
             rid: linux-x64

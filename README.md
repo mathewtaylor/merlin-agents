@@ -88,8 +88,8 @@ signal that cannot be read is reported as *not observed*, which Merlin will not 
 | Idle footprint | 0 MB, 0% CPU — no resident process |
 | Active | ~2–3 s every 6 hours |
 | Install size | ~12 MB agent + osquery |
-| Platforms | Windows (Home, Pro, Enterprise, Server), macOS, Linux |
-| Architectures | `win-x64`, `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` |
+| Platforms | Windows (Home, Pro, Enterprise, Server), macOS (Apple silicon), Linux |
+| Architectures | `win-x64`, `osx-arm64`, `linux-x64`, `linux-arm64` |
 | Runtime | none — single self-contained NativeAOT executable |
 
 ## Security
@@ -115,8 +115,15 @@ dotnet publish src/Merlin.Agent -r osx-arm64 -c Release   # NativeAOT, this mach
 ```
 
 **NativeAOT cannot be cross-compiled**, so each shippable binary is produced by CI on a runner of
-that architecture — including `osx-x64`, which needs an Intel-hosted macOS runner and cannot be
-built on Apple silicon. `Merlin.Agent.Core` targets `net10.0` and holds everything platform-neutral
+that architecture.
+
+**Intel Macs (`osx-x64`) are not currently published.** They need an Intel-hosted macOS runner and
+cannot be built on Apple silicon; `macos-13` was the last GitHub-hosted Intel image and no longer
+picks jobs up. The source builds for `osx-x64` unchanged — run the publish command above on an
+Intel Mac if you need one — but no release asset is produced, so Merlin does not offer an Intel-Mac
+install command. Restoring it means a self-hosted runner and putting the matrix entry back.
+
+`Merlin.Agent.Core` targets `net10.0` and holds everything platform-neutral
 — the wire contracts, the signature envelope, and all three osquery normalisers — so the logic that
 decides what counts as *not observed* is testable on any machine, for every platform.
 
