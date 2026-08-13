@@ -60,6 +60,17 @@ never becomes a pass or a failure.
 
 ### Windows
 
+- **The screen-lock timeout is observed only where a machine-scope policy sets it.** The one
+  machine-wide source is `InactivityTimeoutSecs` — *Interactive logon: Machine inactivity limit* —
+  and that value exists only once someone sets the policy, by Group Policy or locally. On an
+  unmanaged machine the key is simply absent and the reading is null.
+
+  The setting most people actually use is the screensaver timeout plus *on resume, display logon
+  screen*, and it is **deliberately not read**: it lives in `HKCU`, so collecting it would mean
+  reaching into the signed-in person's registry hive from a SYSTEM service — the one thing this
+  agent does not do. See [privacy.md](privacy.md). There is no third source, so a Windows machine
+  with no inactivity policy cannot report this signal at all, and the honest answer is silence
+  rather than an inferred value from somebody's user profile.
 - **Pending security updates are not counted.** osquery has no table for it, and the Windows Update
   COM API is a dependency this agent avoids. `patches` gives the date of the last installed update
   instead, and Merlin's patch check falls back to that age — which is observable and actionable,
