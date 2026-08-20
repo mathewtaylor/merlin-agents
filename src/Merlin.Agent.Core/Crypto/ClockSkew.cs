@@ -54,6 +54,34 @@ public static class ClockSkew
     public const long MaximumPlausibleSeconds = 10L * 365 * 24 * 3600;
 
     /// <summary>
+    /// A stored correction, or zero when it is not one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Bounding what is LEARNED only stops the poisoning; this is what heals a machine already
+    /// poisoned.</b> The correction is read back from <c>state.json</c> at the top of every run and
+    /// applied by <c>now.AddSeconds(...)</c> before the request is built — so a state file carrying
+    /// an absurd value throws there, before anything is sent and therefore before anything can
+    /// relearn it. A fix that only validates new values leaves such a machine exactly as stuck as
+    /// it was, and the file it needs edited is root-owned.
+    /// </para>
+    /// <para>
+    /// Zero is the right answer rather than a refusal to run: an unusable correction is no better
+    /// than none, and starting from none is a state the machine knows how to leave — the next skew
+    /// refusal teaches it the real one, which is then persisted over the nonsense.
+    /// </para>
+    /// </remarks>
+    /// <param name="offset">The correction as stored.</param>
+    /// <returns>The correction, or zero when it could not have come from a clock.</returns>
+    public static long Sanitise(long offset) =>
+
+        // COMPARED, NOT Math.Abs'd. Math.Abs(long.MinValue) THROWS — its negation does not fit in
+        // a long — so the one input most likely to reach a bound check is the one that would have
+        // turned this guard into the exception it exists to prevent. A stored offset is read from a
+        // file, so long.MinValue is not a hypothetical.
+        offset > MaximumPlausibleSeconds || offset < -MaximumPlausibleSeconds ? 0 : offset;
+
+    /// <summary>
     /// Decides whether a refusal's <c>serverTime</c> is worth adopting as this machine's correction.
     /// </summary>
     /// <remarks>
@@ -85,6 +113,9 @@ public static class ClockSkew
     /// <returns><c>true</c> when the caller should adopt <paramref name="learned"/> and retry.</returns>
     public static bool TryLearn(long serverTime, DateTimeOffset now, long applied, out long learned)
     {
+        // SANITISED FIRST, so the subtraction below is between two bounded values. This is public
+        // API in a library both binaries link, and the caller's own value comes from a file.
+        applied = Sanitise(applied);
         learned = applied;
 
         if (serverTime <= 0)

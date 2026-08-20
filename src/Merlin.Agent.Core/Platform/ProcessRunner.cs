@@ -142,6 +142,21 @@ public static class ProcessRunner
 
     private static ProcessOutcome Run(ProcessStartInfo startInfo, TimeSpan timeout)
     {
+        // NO TIME LEFT MEANS DO NOT START IT, and this is the one place that can say so for every
+        // caller. A collection clamps each step's timeout to what is left of its deadline, so once
+        // that deadline passes the clamp hands out zero — and spawning a process in order to fail
+        // its own WaitForExit immediately is worse than not spawning it: it is a process creation,
+        // a kill, and two pipe drains per call, all of it AFTER the bound that was supposed to stop
+        // exactly that, and all of it still holding the machine lock.
+        //
+        // Started: false is the honest report and needs no new handling anywhere — every caller
+        // already turns "it did not start" into a not-observed reading rather than a negative one.
+        if (timeout <= TimeSpan.Zero)
+        {
+            return new ProcessOutcome(
+                false, false, 0, string.Empty, "There was no time left to run it.", false);
+        }
+
         try
         {
             using Process? process = Process.Start(startInfo);

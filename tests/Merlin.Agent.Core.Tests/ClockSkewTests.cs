@@ -135,6 +135,65 @@ public sealed class ClockSkewTests
     }
 
     /// <summary>
+    /// No input can make the rule throw, including the ones that break <c>Math.Abs</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b><c>Math.Abs(long.MinValue)</c> throws</b> — its negation does not fit in a <c>long</c> —
+    /// so a bound check written the obvious way turns into the exception it exists to prevent, on
+    /// exactly the input most likely to reach it. Both arguments here come from outside: the server
+    /// time from a refusal body, and the applied correction from a file. This caught a real defect
+    /// in the first draft of the guard.
+    /// </remarks>
+    [Theory]
+    [InlineData(long.MinValue, 0L)]
+    [InlineData(long.MaxValue, 0L)]
+    [InlineData(long.MinValue, long.MinValue)]
+    [InlineData(long.MaxValue, long.MaxValue)]
+    [InlineData(0L, long.MinValue)]
+    [InlineData(1786000000L, long.MinValue)]
+    [InlineData(1786000000L, long.MaxValue)]
+    public void NoInputMakesTheRuleThrow(long serverTime, long applied)
+    {
+        // The answer is not what is under test — that it RETURNS one is.
+        _ = ClockSkew.TryLearn(serverTime, _now, applied, out _);
+        _ = ClockSkew.TryLearn(serverTime, DateTimeOffset.MinValue, applied, out _);
+        _ = ClockSkew.TryLearn(serverTime, DateTimeOffset.MaxValue, applied, out _);
+        _ = ClockSkew.Sanitise(applied);
+    }
+
+    /// <summary>
+    /// A machine already carrying an impossible correction heals itself.
+    /// </summary>
+    /// <remarks>
+    /// <b>Bounding what is LEARNED prevents the poisoning; this is what recovers from it.</b> The
+    /// correction is read from <c>state.json</c> and applied before the request is built, so an
+    /// absurd stored value throws there — before anything is sent, and therefore before anything
+    /// can relearn it. Validating only new values leaves such a machine exactly as stuck as it was,
+    /// with a root-owned file as the only repair. Zero is the right substitute: an unusable
+    /// correction is no better than none, and none is a state the machine knows how to leave.
+    /// </remarks>
+    [Theory]
+    [InlineData(251615078085L)]
+    [InlineData(long.MaxValue)]
+    [InlineData(long.MinValue)]
+    [InlineData(-251615078085L)]
+    public void AnImpossibleStoredCorrectionIsDiscarded(long stored)
+    {
+        Assert.Equal(0, ClockSkew.Sanitise(stored));
+    }
+
+    /// <summary>A correction that could have come from a clock is kept exactly as stored.</summary>
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(3600L)]
+    [InlineData(-3600L)]
+    [InlineData(315360000L)]
+    public void APlausibleStoredCorrectionIsKept(long stored)
+    {
+        Assert.Equal(stored, ClockSkew.Sanitise(stored));
+    }
+
+    /// <summary>
     /// The threshold must stay below the server's skew tolerance, or there is a band in which the
     /// server refuses and the agent declines to learn.
     /// </summary>

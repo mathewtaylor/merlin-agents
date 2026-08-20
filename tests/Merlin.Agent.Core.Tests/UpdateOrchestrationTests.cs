@@ -473,6 +473,41 @@ public sealed class UpdateOrchestrationTests
     }
 
     /// <summary>
+    /// A step with no time left is not started at all.
+    /// </summary>
+    /// <remarks>
+    /// <b>Clamping alone is not enough, and the gap is paid in exactly the currency the bound
+    /// exists to save.</b> Once a collection's deadline passes, every remaining step clamps to
+    /// zero — and a zero timeout still spawned the process, failed its own <c>WaitForExit</c>
+    /// immediately, killed it and drained two pipes. Three such steps run after the deadline on
+    /// Linux, all of it while holding the machine lock, which is the one thing the deadline was
+    /// added to stop. Refusing here covers every caller at once rather than asking each of them
+    /// to remember.
+    /// </remarks>
+    [Fact]
+    public void AStepWithNoTimeLeftIsNeverStarted()
+    {
+        // A command that certainly exists and certainly succeeds, so nothing but the spent budget
+        // can account for the answer.
+        (string command, string[] arguments) = OperatingSystem.IsWindows()
+            ? ("cmd.exe", new[] { "/c", "echo hello" })
+            : ("/bin/sh", new[] { "-c", "echo hello" });
+
+        ProcessOutcome outcome = ProcessRunner.Run(command, arguments, TimeSpan.Zero);
+
+        Assert.False(outcome.Started);
+        Assert.False(outcome.Succeeded);
+        Assert.Empty(outcome.StandardOutput);
+
+        // And it really did run when there WAS time, so the assertions above are about the budget
+        // rather than about the command.
+        ProcessOutcome ran = ProcessRunner.Run(command, arguments, TimeSpan.FromSeconds(30));
+
+        Assert.True(ran.Succeeded);
+        Assert.Contains("hello", ran.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// One deadline bounds a whole collection, and every step clamps to what is left of it.
     /// </summary>
     /// <remarks>

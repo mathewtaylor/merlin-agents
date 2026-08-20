@@ -92,7 +92,7 @@ public sealed class ReportClient : IDisposable
 
         _key = key;
         _agentVersion = agentVersion;
-        ClockOffsetSeconds = clockOffsetSeconds;
+        ClockOffsetSeconds = ClockSkew.Sanitise(clockOffsetSeconds);
     }
 
     /// <summary>

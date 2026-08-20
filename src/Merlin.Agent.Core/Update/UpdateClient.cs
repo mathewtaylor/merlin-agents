@@ -100,7 +100,7 @@ public sealed class UpdateClient : IDisposable
         _key = key;
         _ownsHttp = true;
         AgentVersion = agentVersion;
-        ClockOffsetSeconds = clockOffsetSeconds;
+        ClockOffsetSeconds = ClockSkew.Sanitise(clockOffsetSeconds);
     }
 
     /// <summary>
@@ -127,7 +127,7 @@ public sealed class UpdateClient : IDisposable
         _key = key;
         _ownsHttp = false;
         AgentVersion = agentVersion;
-        ClockOffsetSeconds = clockOffsetSeconds;
+        ClockOffsetSeconds = ClockSkew.Sanitise(clockOffsetSeconds);
     }
 
     /// <summary>The calling component's version, sent as a header.</summary>
