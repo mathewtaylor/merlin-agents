@@ -162,8 +162,11 @@ public static class ReadingParsers
     /// </param>
     /// <param name="deviceNodeVisible">Whether <c>/sys/class/tpm/tpm0</c> could be seen.</param>
     /// <param name="sysfsVisible">
-    /// Whether the enumeration point the device node would appear under could be seen. When it
-    /// could not, nothing was established and the answer is <c>null</c>.
+    /// Whether <c>/sys/class</c> — the sysfs class enumeration point — could be seen. When it could
+    /// not, nothing whatever was established and the answer is <c>null</c>. <b>NOT
+    /// <c>/sys/class/tpm</c>:</b> that directory is itself absent when no TPM driver ever
+    /// registered, so passing it would collapse the ordinary no-TPM answer on a virtual machine or
+    /// an older board from a true <c>false</c> into "not observed", losing a real reading.
     /// </param>
     /// <returns>Whether a TPM is present, and its major version when that could be read.</returns>
     public static (bool? Present, string? Version) TpmFromSysfs(

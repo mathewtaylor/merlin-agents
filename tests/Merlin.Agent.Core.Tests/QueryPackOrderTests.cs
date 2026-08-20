@@ -37,7 +37,24 @@ public sealed class QueryPackOrderTests
         ["linux.json"] = ["system_volume", "system_info"],
         ["macos.json"] = ["system_volume", "system_info"],
         ["windows.json"] =
-            ["system_drive", "system_info", "os_edition", "machine_guid", "chassis", "entra_join"],
+            ["system_drive", "system_info", "machine_guid", "chassis", "entra_join"],
+    };
+
+    /// <summary>
+    /// How many queries each pack holds, so ADDING one forces a classification rather than
+    /// defaulting to posture.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this the file's own claim was false.</b> An unclassified query is treated as
+    /// posture, so a new INVENTORY query inserted anywhere before the existing inventory block
+    /// passes silently — it is only caught when it lands at or after the first classified inventory
+    /// key. A count is the cheapest thing that cannot be satisfied by omission.
+    /// </remarks>
+    private static readonly Dictionary<string, int> _expectedCount = new(StringComparer.Ordinal)
+    {
+        ["linux.json"] = 7,
+        ["macos.json"] = 10,
+        ["windows.json"] = 16,
     };
 
     [Theory]
@@ -56,15 +73,23 @@ public sealed class QueryPackOrderTests
             Assert.Contains(name, keys);
         }
 
+        Assert.Equal(_expectedCount[pack], keys.Count);
+
+        // DefaultIfEmpty rather than a bare Max/Min: an all-inventory or all-posture pack would
+        // otherwise throw "sequence contains no elements" instead of the message written below.
         int lastPosture = keys
             .Select((name, index) => (name, index))
             .Where(entry => !inventory.Contains(entry.name, StringComparer.Ordinal))
-            .Max(entry => entry.index);
+            .Select(entry => entry.index)
+            .DefaultIfEmpty(-1)
+            .Max();
 
         int firstInventory = keys
             .Select((name, index) => (name, index))
             .Where(entry => inventory.Contains(entry.name, StringComparer.Ordinal))
-            .Min(entry => entry.index);
+            .Select(entry => entry.index)
+            .DefaultIfEmpty(keys.Count)
+            .Min();
 
         Assert.True(
             lastPosture < firstInventory,
@@ -94,6 +119,24 @@ public sealed class QueryPackOrderTests
         Assert.True(
             keys.IndexOf("kernel") < keys.IndexOf("system_info"),
             "kernel must run before system_info — it is patch currency, not inventory.");
+    }
+
+    /// <remarks>
+    /// <b><c>JsonDocument</c> enumerates properties in DOCUMENT order</b>, which is what makes this
+    /// file possible at all — it is a read-only view over the original payload rather than a
+    /// re-materialised map. That is a property of the implementation rather than a documented
+    /// guarantee of <c>EnumerateObject</c>, so the theory below pins a known order as its own
+    /// check: were it ever to sort or rehash, every assertion here would silently become vacuous.
+    /// </remarks>
+    [Fact]
+    public void TheJsonReaderPreservesDocumentOrder()
+    {
+        using JsonDocument document =
+            JsonDocument.Parse("""{"zulu":1,"alpha":2,"mike":3,"bravo":4}""");
+
+        Assert.Equal(
+            ["zulu", "alpha", "mike", "bravo"],
+            document.RootElement.EnumerateObject().Select(p => p.Name));
     }
 
     private static List<string> Keys(string pack)

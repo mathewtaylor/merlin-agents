@@ -96,6 +96,64 @@ public sealed class WindowsNormaliserTests
         Assert.Equal(DiskEncryptionMethod.None, volume.Method);
     }
 
+    /// <summary>
+    /// An unprotected volume whose EDITION could not be read is not graded either way.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the case that made a Home laptop look like a Pro machine with encryption switched
+    /// off.</b> `os_edition` sat inside the block a spent collection budget discards, and the
+    /// edition check answered a blank string with <c>false</c> — so a slow Home machine, which
+    /// cannot encrypt at all, was reported as one where somebody had turned it off, which is a
+    /// nonconformity raised against the exact fleet this agent exists to serve. Unprotected on Home
+    /// is a licensing fact and unprotected on Pro is a finding; without knowing which, asserting
+    /// either is a guess, and one of the two guesses is a false accusation. Moving the query into
+    /// the posture block fixes the ordering, but the reading must be honest even if it is never
+    /// collected at all.
+    /// </remarks>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AnUnprotectedVolumeOfUnknownEditionIsNotGraded(string? edition)
+    {
+        OsqueryResults results = new();
+
+        if (edition is not null)
+        {
+            results.Add("os_edition", [Row(("data", edition))]);
+        }
+
+        results.Add("bitlocker", [Row(("drive_letter", "C:"), ("protection_status", "0"))]);
+
+        AgentVolumeReading volume = Assert.Single(Build(results).Encryption!);
+
+        Assert.Equal(DiskEncryptionMethod.NotObserved, volume.Method);
+
+        // The encryption state ITSELF was read and is still reported — it is only the grading that
+        // is withheld.
+        Assert.False(volume.Protected);
+    }
+
+    /// <summary>
+    /// A volume that IS encrypted still reports as encrypted when the edition is unknown.
+    /// </summary>
+    /// <remarks>
+    /// The unknown edition costs the mechanism's NAME, not the reading. Withholding this one would
+    /// discard a confirmed protection, which is the opposite error and just as wrong.
+    /// </remarks>
+    [Fact]
+    public void AProtectedVolumeOfUnknownEditionIsStillReportedEncrypted()
+    {
+        OsqueryResults results = new();
+        results.Add("bitlocker", [Row(("drive_letter", "C:"), ("protection_status", "1"))]);
+
+        AgentVolumeReading volume = Assert.Single(Build(results).Encryption!);
+
+        Assert.True(volume.Protected);
+        Assert.NotEqual(DiskEncryptionMethod.None, volume.Method);
+        Assert.NotEqual(DiskEncryptionMethod.NotObserved, volume.Method);
+    }
+
     [Fact]
     public void AProtectedVolumeOnHomeIsDeviceEncryptionNotBitLocker()
     {

@@ -141,23 +141,36 @@ public enum AgentUpdateOutcome
     Succeeded,
 
     /// <summary>
-    /// The last attempt did not succeed. <b>It covers two states that this value cannot tell
+    /// The last attempt did not succeed. <b>It covers THREE states that this value cannot tell
     /// apart, and a server must not be built as though it can.</b>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Usually nothing was replaced at all — a download failure, a hash mismatch, a non-allowlisted
-    /// host, a staged binary that would not execute — and the machine is still on what it had.
+    /// <b>Nothing was replaced.</b> A download failure, a hash mismatch, a non-allowlisted host, a
+    /// staged binary that would not execute. The machine is still on what it had; the next
+    /// scheduled run tries again and no operator action is needed.
     /// </para>
     /// <para>
-    /// But it is also what a failed RECOVERY reports: a component that WAS replaced, has not run
-    /// since, and either could not be restored or had no retained binary to restore. That is the
-    /// worst state this design admits, and it is the same enum value. The agent records a sentence
-    /// naming the missing fallback, but it keeps it locally — it is what <c>merlin-agent status</c>
-    /// prints and it does not cross the wire. What separates the two without asking the machine is
-    /// corroborating evidence the report already carries: a <see cref="Failed"/> whose
-    /// <c>agentVersion</c> has not moved and whose reports then stop is the second case. See
-    /// <c>docs/protocol.md</c> § the report.
+    /// <b>Something is installed that nothing ever ran.</b> Not a lost binary and not a bad
+    /// release — the component is present and has never started, which on the upgrade path from any
+    /// release predating the updater means its scheduled task, launch daemon or systemd timer was
+    /// never created. This is the only one of the three an operator can act on without publishing
+    /// anything, and because the missing schedule arrives with the upgrade it is normally
+    /// fleet-wide rather than one machine.
+    /// </para>
+    /// <para>
+    /// <b>A component was replaced and cannot be put back.</b> It has not run since, and either
+    /// could not be restored or had no retained binary to restore. That is the worst state this
+    /// design admits, and it is the same enum value as the other two.
+    /// </para>
+    /// <para>
+    /// The agent records a sentence naming which of the three it was, but it keeps it locally — it
+    /// is what <c>merlin-agent status</c> prints and it does not cross the wire. What narrows them
+    /// without asking the machine is corroborating evidence the report already carries: the version
+    /// of the component that failed. A <see cref="Failed"/> whose <c>agentVersion</c> has not moved
+    /// and whose reports then stop is the third case; when it is the UPDATER that failed the agent
+    /// keeps reporting normally, and <c>updaterVersion</c> — null when the updater is absent or
+    /// will not run — is the field that shows it. See <c>docs/protocol.md</c> § the report.
     /// </para>
     /// </remarks>
     Failed,

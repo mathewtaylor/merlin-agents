@@ -250,7 +250,11 @@ public static class MacOsNormaliser
     /// </remarks>
     private static bool? SecureEnclave(OsqueryResults results)
     {
-        string? cpu = results.Value("system_info", "cpu_brand");
+        // FROM ITS OWN QUERY, not from `system_info`. This is the only hardware-security-processor
+        // signal macOS exposes, and it was being read out of the inventory query that runs LAST —
+        // so a machine that ran out of collection budget gave this reading up before it gave up its
+        // hostname, which is the inversion the pack ordering exists to prevent.
+        string? cpu = results.Value("secure_enclave", "cpu_brand");
 
         return cpu is not null && cpu.Contains("Apple", StringComparison.OrdinalIgnoreCase)
             ? true

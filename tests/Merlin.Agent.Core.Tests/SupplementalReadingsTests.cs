@@ -159,6 +159,11 @@ public sealed class SupplementalReadingsTests
     // Nothing to look in. Not observed — never a protection reported as absent.
     [InlineData(null, false, false, null, null)]
     [InlineData("", false, false, null, null)]
+    [InlineData("   ", false, false, null, null)]
+
+    // The node in view but not the enumeration point above it. Unreachable through the current
+    // call site, which probes both — but this is public API and the answer must still be honest.
+    [InlineData(null, true, false, true, null)]
     public void ATpmIsOnlyAbsentOnAMachineWeCouldExamine(
         string? versionMajor,
         bool deviceNodeVisible,
@@ -177,12 +182,24 @@ public sealed class SupplementalReadingsTests
     /// The flag and the version are two halves of ONE observation and can never disagree.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// They were once derived from two independent reads, which is what let a machine report a TPM
     /// that is present with no version — or a version for a machine reported as having none.
+    /// </para>
+    /// <para>
+    /// <b>Both assertions are UNCONDITIONAL, and that is not a style preference.</b> Written as two
+    /// <c>if</c> blocks, the rows returning <c>(true, null)</c> and <c>(null, null)</c> entered
+    /// neither — and xUnit does not fail a test that asserts nothing, so half the rows were green
+    /// no matter what the method returned. A theory that reports coverage it does not have is worse
+    /// than no theory, because it is counted.
+    /// </para>
     /// </remarks>
     [Theory]
     [InlineData("2", true, true)]
+    [InlineData("2", false, false)]
+    [InlineData("   ", true, true)]
     [InlineData(null, true, true)]
+    [InlineData(null, true, false)]
     [InlineData(null, false, true)]
     [InlineData(null, false, false)]
     public void ATpmVersionIsNeverReportedForAMachineSaidToHaveNoTpm(
@@ -193,15 +210,16 @@ public sealed class SupplementalReadingsTests
         (bool? present, string? version) =
             ReadingParsers.TpmFromSysfs(versionMajor, deviceNodeVisible, sysfsVisible);
 
-        if (version is not null)
-        {
-            Assert.True(present);
-        }
+        Assert.True(
+            version is null || present is true,
+            $"version '{version}' was reported alongside present={FormatPresence(present)}, so the "
+            + "two halves of one reading disagree.");
 
-        // And the converse: a definite absence carries nothing to describe.
-        if (present is false)
-        {
-            Assert.Null(version);
-        }
+        Assert.True(
+            present is not false || version is null,
+            $"a definite absence carried the version '{version}'.");
     }
+
+    private static string FormatPresence(bool? present) =>
+        present?.ToString() ?? "null";
 }

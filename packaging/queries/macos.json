@@ -75,6 +75,10 @@
       "sql": "SELECT enabled, grace_period FROM screenlock;",
       "purpose": "Whether unlocking this Mac requires a password (A.7.7 clear screen). Expect NO ROWS in normal operation: osquery reads this from the current logged-in user context, and the agent runs as root from a launch daemon which has none. That is why Merlin usually shows this signal as not observed on a Mac."
     },
+    "secure_enclave": {
+      "sql": "SELECT cpu_brand FROM system_info;",
+      "purpose": "The CPU brand, which establishes whether this Mac has a Secure Enclave \u2014 the only hardware-security-processor signal macOS exposes. Split out of `system_info` so it runs with the posture queries rather than being discarded with inventory on a slow machine."
+    },
     "local_admins": {
       "$comment": [
         "Returns LOCAL ACCOUNT names, not the identity of whoever is signed in. A.8.2 is",
@@ -93,8 +97,8 @@
       "purpose": "Free space on the system volume (A.8.6 capacity)."
     },
     "system_info": {
-      "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model, cpu_brand FROM system_info;",
-      "purpose": "Machine identity, the serial used to reconcile against the asset register, and the CPU brand that establishes whether this Mac has a Secure Enclave."
+      "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model FROM system_info;",
+      "purpose": "Machine identity, and the serial used to reconcile against the asset register."
     }
   }
 }

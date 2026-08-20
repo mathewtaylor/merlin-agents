@@ -29,6 +29,10 @@
       "sql": "SELECT drive_letter, protection_status, conversion_status, encryption_method, percentage_encrypted FROM bitlocker_info;",
       "purpose": "Per-volume disk encryption state, including Windows Home Device Encryption."
     },
+    "os_edition": {
+      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\EditionID';",
+      "purpose": "Edition (Home / Pro / Server). Gates which controls can physically apply \u2014 a Home machine cannot run BitLocker, so an unprotected volume there is a licensing fact rather than a protection somebody switched off. It runs directly after `bitlocker` because it is what decides how those rows are graded."
+    },
     "security_products": {
       "sql": "SELECT name, state, state_timestamp FROM windows_security_products WHERE type = 'Antivirus';",
       "purpose": "The registered antimalware product and whether the platform considers it healthy."
@@ -77,10 +81,6 @@
     "system_info": {
       "sql": "SELECT hostname, hardware_serial, hardware_vendor, hardware_model FROM system_info;",
       "purpose": "Machine identity, and the serial used to reconcile against the asset register."
-    },
-    "os_edition": {
-      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\EditionID';",
-      "purpose": "Edition (Home / Pro / Server). Gates which controls can physically apply \u2014 a Home machine cannot run BitLocker."
     },
     "machine_guid": {
       "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid';",

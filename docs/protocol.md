@@ -150,22 +150,32 @@ silent failed update is the worst thing auto-update can produce. `Reverted` is d
 from `Failed`: a revert means a bad binary reached the machine and was survived, which is the case a
 staged rollout exists to catch.
 
-`Failed` is the broader of the two and covers **two** situations that read very differently on a
-device page. Usually it means nothing was replaced at all — a download failure, a hash mismatch, a
-refused host, a staged binary that would not execute — and the machine is still on what it had.
-But it is also what a failed RECOVERY reports: a component that was replaced, has not run since,
-and either could not be restored or had no retained binary to restore. That second case is the
-worst state this design admits.
+`Failed` is the broader of the two and covers **three** situations that read very differently on a
+device page.
 
-**The two are NOT distinguishable from this payload, and a server must not be built as though they
-are.** The agent records a sentence naming the missing fallback, but it keeps it locally — it is
+1. **Nothing was replaced at all** — a download failure, a hash mismatch, a refused host, a staged
+   binary that would not execute. The machine is still on what it had, the next scheduled run tries
+   again, and nobody need do anything.
+2. **Something is installed that nothing ever ran.** Not a lost binary and not a bad release: the
+   component is present and has never started, which on the upgrade path from any release predating
+   the updater means its scheduled task, launch daemon or systemd timer was never created. This is
+   the only one of the three an operator can act on without publishing anything — and because the
+   missing schedule arrives with the upgrade, it is normally fleet-wide rather than one machine.
+3. **A component was replaced and cannot be put back** — it has not run since, and either could not
+   be restored or had no retained binary to restore. That case is the worst state this design
+   admits.
+
+**The three are NOT distinguishable from this payload, and a server must not be built as though
+they are.** The agent records a sentence naming which it was, but it keeps it locally — it is
 what `merlin-agent status` prints, and it does not cross the wire; the report carries the outcome
 and nothing else. So `Failed` means "the last attempt did not succeed", and telling a machine that
 merely failed to download from one that was left with no working binary needs the device itself.
-The signal that separates them without asking the machine is CORROBORATING evidence this payload
-already carries: a `Failed` whose `agentVersion` has not moved and whose reports then stop is the
-second case. Widening the payload is possible, but it is a wire change and is deliberately not
-made here.
+What narrows them without asking the machine is CORROBORATING evidence this payload already
+carries — the version of the component that failed. A `Failed` whose `agentVersion` has not moved
+and whose reports then stop is case 3. When it is the UPDATER that failed the agent keeps reporting
+normally, so `agentVersion` says nothing; `updaterVersion` is the field that shows it, and it is
+null when the updater is absent or will not run. Widening the payload is possible, but it is a wire
+change and is deliberately not made here.
 
 **202** on acceptance.
 
