@@ -119,7 +119,11 @@ public static class ProcessRunner
     /// <param name="fileName">The executable.</param>
     /// <param name="arguments">Its argument string.</param>
     /// <param name="workingDirectory">The working directory, or null for the current one.</param>
-    /// <param name="timeout">How long it may take.</param>
+    /// <param name="timeout">
+    /// How long it may take. <b>Zero or less means do not start it</b>, reported as
+    /// <see cref="ProcessOutcome.Started"/> <c>false</c> — the same contract as the list overload,
+    /// because both funnel into the same private runner and the guard lives there.
+    /// </param>
     /// <returns>What happened.</returns>
     public static ProcessOutcome Run(
         string fileName,

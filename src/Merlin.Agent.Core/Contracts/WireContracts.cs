@@ -141,10 +141,25 @@ public enum AgentUpdateOutcome
     Succeeded,
 
     /// <summary>
-    /// The attempt did not complete — a download failure, a hash mismatch, a non-allowlisted host,
-    /// or a staged binary that would not execute. <b>Nothing was replaced</b>, so the machine is
-    /// still on what it had.
+    /// The last attempt did not succeed. <b>It covers two states that this value cannot tell
+    /// apart, and a server must not be built as though it can.</b>
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Usually nothing was replaced at all — a download failure, a hash mismatch, a non-allowlisted
+    /// host, a staged binary that would not execute — and the machine is still on what it had.
+    /// </para>
+    /// <para>
+    /// But it is also what a failed RECOVERY reports: a component that WAS replaced, has not run
+    /// since, and either could not be restored or had no retained binary to restore. That is the
+    /// worst state this design admits, and it is the same enum value. The agent records a sentence
+    /// naming the missing fallback, but it keeps it locally — it is what <c>merlin-agent status</c>
+    /// prints and it does not cross the wire. What separates the two without asking the machine is
+    /// corroborating evidence the report already carries: a <see cref="Failed"/> whose
+    /// <c>agentVersion</c> has not moved and whose reports then stop is the second case. See
+    /// <c>docs/protocol.md</c> § the report.
+    /// </para>
+    /// </remarks>
     Failed,
 
     /// <summary>

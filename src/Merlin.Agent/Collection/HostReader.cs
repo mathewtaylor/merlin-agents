@@ -286,32 +286,27 @@ public static class HostReader
     /// The directory is what separates them: <c>/sys/class/tpm/tpm0</c> exists if and only if the
     /// kernel bound a TPM driver, and it needs no read permission on the file inside to test.
     /// </para>
+    /// <para>
+    /// <b>The enumeration point is probed too, and it is not belt-and-braces.</b>
+    /// <c>Directory.Exists</c> RETURNS FALSE for a path it cannot stat — it does not throw, so
+    /// there is no exception to catch and no way to tell the two apart from that one call. Asking
+    /// only about <c>tpm0</c> therefore reports "the kernel bound no TPM" for a machine with no
+    /// <c>/sys</c> mounted at all, which is a container, a chroot or a lockdown environment being
+    /// told it has no security processor on the strength of a node nobody could look at. The
+    /// decision itself is <see cref="ReadingParsers.TpmFromSysfs"/> so it can be tested; this
+    /// method is only the three probes.
+    /// </para>
     /// </remarks>
     /// <returns>Whether a TPM is present, and its major version when that could be read.</returns>
     private static (bool? Present, string? Version) LinuxTpm()
     {
+        const string classes = "/sys/class";
         const string device = "/sys/class/tpm/tpm0";
 
-        string? major = CommandRunner.ReadFile($"{device}/tpm_version_major")?.Trim();
-
-        if (!string.IsNullOrWhiteSpace(major))
-        {
-            return (true, major);
-        }
-
-        try
-        {
-            // No device node at all is an OBSERVED absence — this is the ordinary answer on a
-            // virtual machine or an older board, and reporting it as unknown would lose a true
-            // reading. A node that exists whose version we could not read is a TPM we can see and
-            // cannot describe: present, version unknown.
-            return Directory.Exists(device) ? (true, null) : (false, null);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            // We could not even determine that much. Not observed.
-            return (null, null);
-        }
+        return ReadingParsers.TpmFromSysfs(
+            CommandRunner.ReadFile($"{device}/tpm_version_major"),
+            Directory.Exists(device),
+            Directory.Exists(classes));
     }
 
     /// <summary>

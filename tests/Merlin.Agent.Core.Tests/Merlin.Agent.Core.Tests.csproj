@@ -16,4 +16,14 @@
     <ProjectReference Include="..\..\src\Merlin.Agent.Core\Merlin.Agent.Core.csproj" />
   </ItemGroup>
 
+  <!--
+    THE SHIPPING PACKS, NOT A COPY OF THEM. QueryPackOrderTests asserts the order of the entries in
+    these files, and the assertion is only worth having if it reads the files that are installed.
+  -->
+  <ItemGroup>
+    <Content Include="..\..\packaging\queries\*.json" LinkBase="queries">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
