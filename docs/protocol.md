@@ -244,7 +244,7 @@ ever, refused every time, with nothing on the machine able to clear it.
 | Update-check cadence | the updater daily, jittered by up to 2 h; the agent on every collection |
 | Minimum gap between scheduled updater checks | 1 h — `run --now` bypasses it |
 | Minimum gap between agent update checks | none, deliberately: a collection is never skipped to spare a download |
-| Maximum length of one collection | 100 s, shared across the version probe, the query pack and the host readings |
+| Maximum length of one collection | 100 s, shared across the version probe, the query pack and the host readings — plus up to 10 s of pipe drain for a step killed at the deadline |
 | Maximum entries in a package archive | 512 |
 | Maximum size of an extracted package entry | 256 MB |
 | Maximum package archive | 256 MB |

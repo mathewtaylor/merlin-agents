@@ -20,7 +20,12 @@
     "A query that fails or returns nothing produces a NULL reading, never a false one. Merlin",
     "treats null as 'not observed' and will not raise a nonconformity from it.",
     "",
-    "QUERIES RUN IN THE ORDER LISTED HERE, AND THE ORDER IS DELIBERATE. A collection is bounded so it cannot hold the machine lock past the point where the updater gives up waiting for it, and on a machine where osquery answers slowly that bound is reached before the end of this list. Whatever is left is reported as NOT OBSERVED, so the security-posture queries come first and the inventory ones last: losing a hostname degrades a device page, while losing disk encryption or the firewall loses the reading the ISMS exists to take."
+    "QUERIES RUN IN THE ORDER LISTED HERE, AND THE ORDER IS DELIBERATE. A collection is bounded so",
+    "it cannot hold the machine lock past the point where the updater gives up waiting for it, and",
+    "on a machine where osquery answers slowly that bound is reached before the end of this list.",
+    "Whatever is left is reported as NOT OBSERVED, so the security-posture queries come first and",
+    "the inventory ones last: losing a hostname degrades a device page, while losing disk encryption",
+    "or the firewall loses the reading the ISMS exists to take."
   ],
   "version": 1,
   "queries": {

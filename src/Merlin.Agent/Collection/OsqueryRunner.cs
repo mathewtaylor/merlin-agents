@@ -115,18 +115,27 @@ public sealed class OsqueryRunner
     /// <returns>The version string.</returns>
     public string? Version()
     {
-        (string? output, _) = Execute("--version");
+        // A SHORT TIMEOUT OF ITS OWN, because this runs FIRST and is worth the least. It is
+        // metadata about the collector rather than a reading about the machine, and on the slow
+        // machine the budget exists for it would otherwise take up to a third of that budget
+        // before the first security query starts — spending the bound on the one thing the
+        // ordering rule says to sacrifice first.
+        (string? output, _) = Execute(_versionTimeout, "--version");
 
         return output?.Trim() is { Length: > 0 } text ? text : null;
     }
 
     /// <summary>Runs every query in the manifest and collects the rows.</summary>
-    /// <param name="queries">Query name to SQL.</param>
+    /// <param name="queries">
+    /// Query name and SQL, IN THE ORDER THEY SHOULD RUN. The collection is bounded, so this is
+    /// also the order in which readings are sacrificed when it runs out — which is why the packs
+    /// are written security-posture first, and why this is a list rather than a dictionary.
+    /// </param>
     /// <param name="onQueryFailed">Called with the query name and failure detail.</param>
     /// <returns>The results.</returns>
     /// <exception cref="ArgumentNullException">When <paramref name="queries"/> is null.</exception>
     public OsqueryResults RunAll(
-        IReadOnlyDictionary<string, string> queries,
+        IReadOnlyList<KeyValuePair<string, string>> queries,
         Action<string, string>? onQueryFailed = null)
     {
         ArgumentNullException.ThrowIfNull(queries);
@@ -168,7 +177,19 @@ public sealed class OsqueryRunner
         return results;
     }
 
-    private (string? Output, string? Error) Execute(params string[] arguments)
+    /// <summary>
+    /// How long the collector may take to state its own version.
+    /// </summary>
+    /// <remarks>
+    /// A binary printing a compiled-in string. If it cannot manage that in five seconds the
+    /// readings that follow are the ones worth spending the remaining time on.
+    /// </remarks>
+    private static readonly TimeSpan _versionTimeout = TimeSpan.FromSeconds(5);
+
+    private (string? Output, string? Error) Execute(params string[] arguments) =>
+        Execute(_timeout, arguments);
+
+    private (string? Output, string? Error) Execute(TimeSpan timeout, params string[] arguments)
     {
         // THE SHARED RUNNER. This used to read stdout to the end and then stderr, which is the
         // deadlock the binary probe documents: osqueryi writes a glog warning per query, and a
@@ -181,7 +202,7 @@ public sealed class OsqueryRunner
         // inside the updater's lock wait, which is the difference between a bound that holds and
         // one that nearly does.
         ProcessOutcome outcome = ProcessRunner.Run(
-            _osqueryPath, arguments, _deadline.Clamp(_timeout));
+            _osqueryPath, arguments, _deadline.Clamp(timeout));
 
         if (!outcome.Started)
         {
@@ -200,13 +221,21 @@ public sealed class OsqueryRunner
         // JSON is not "osquery returned no rows" — it is "we never saw what it returned". The
         // deserialise below would turn it into a not-observed reading by accident; this makes it
         // one on purpose, and says why.
-        return outcome.Succeeded
-            ? (outcome.StandardOutput, null)
-            : (null, !outcome.OutputComplete
-                ? "its output could not be read to the end"
-                : string.IsNullOrWhiteSpace(outcome.StandardError)
-                    ? $"exit code {outcome.ExitCode}"
-                    : outcome.StandardError.Trim());
+        if (outcome.Succeeded)
+        {
+            return (outcome.StandardOutput, null);
+        }
+
+        // BOTH HALVES, because they are not alternatives. A query can exit non-zero AND have had
+        // its output truncated, and reporting only the truncation drops the exit code and the
+        // stderr — which is the actionable half and the reason the operator is reading this line.
+        string reason = string.IsNullOrWhiteSpace(outcome.StandardError)
+            ? $"exit code {outcome.ExitCode}"
+            : outcome.StandardError.Trim();
+
+        return (null, outcome.OutputComplete
+            ? reason
+            : $"{reason}; its output could not be read to the end");
     }
 }
 

@@ -245,7 +245,19 @@ public sealed class ComponentSwapper
                     + probed.Output.Trim());
             }
 
-            string reported = BinaryProbe.FirstLine(probed.Output) ?? version;
+            // A BINARY THAT SAID NOTHING HAS NOT IDENTIFIED ITSELF, and falling back to the
+            // advertised string here recorded the operator's own input as though the binary had
+            // stated it. That is the field the never-install-this-again rule compares against, and
+            // the substitution is undetectable afterwards: the mismatch warning below cannot fire,
+            // because the value it compares was copied from the thing it is compared to. The probe
+            // already refuses a binary whose output could not be READ; this is the same question
+            // for a binary that ran, was read completely, and printed nothing.
+            if (BinaryProbe.FirstLine(probed.Output) is not { } reported)
+            {
+                return SwapResult.Failed(
+                    $"The staged {fileName} ran but printed no version, so there is nothing to "
+                    + "record it as and it was not installed.");
+            }
 
             if (!AgentVersionInfo.Matches(reported, version))
             {

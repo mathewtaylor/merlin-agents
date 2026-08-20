@@ -12,13 +12,12 @@ namespace Merlin.Agent.Core.Platform;
 /// being wrong in a different way each round.
 /// </para>
 /// <para>
-/// <b>A per-command timeout does not bound a collection, and the difference is what starves the
-/// updater.</b> The agent holds the machine-wide lock for the whole of a run, and the updater waits
-/// two minutes for that lock before giving up and reporting contention — so a collection that
-/// outlasts the wait is a collection during which nothing can put a broken agent back. Sixteen
-/// Windows queries at thirty seconds each, plus the osquery version probe, plus up to three
-/// firewall and policy commands at ten seconds each, is minutes: every individual step bounded,
-/// and the total unbounded in any way that matters.
+/// <b>A per-command timeout does not bound a collection.</b> Sixteen Windows queries at thirty
+/// seconds each, plus the osquery version probe, plus up to three firewall and policy commands at
+/// ten seconds each, is minutes — every individual step bounded, and the total unbounded in any way
+/// that matters. All of it runs while the agent holds the machine-wide lock, and the updater waits
+/// two minutes for that lock before giving up, so every minute a broken osquery costs is a minute
+/// in which nothing can put a broken agent back.
 /// </para>
 /// <para>
 /// <b>One deadline covers the WHOLE collection, not one loop.</b> Bounding only the query pack
@@ -44,11 +43,23 @@ public sealed class CollectionDeadline
     /// How long a whole collection may take.
     /// </summary>
     /// <remarks>
-    /// Chosen against <c>UpdateTurn.LockWait</c> (two minutes) with room for the drain grace a
-    /// killed child is still given: a step may finish exactly at the deadline and then spend up to
-    /// ten seconds collecting what its pipes carried, so the true worst case is this plus ten
-    /// seconds, which must stay under the wait. A healthy collection takes two or three seconds, so
-    /// nothing legitimate is anywhere near it.
+    /// <para>
+    /// A healthy collection takes two or three seconds, so nothing legitimate is anywhere near
+    /// this. The true worst case is this plus about ten seconds: a step may finish exactly at the
+    /// deadline and then spend up to two drain graces collecting what its pipes carried.
+    /// </para>
+    /// <para>
+    /// <b>It bounds the COLLECTION. It does not bound the lock hold, and claiming otherwise would
+    /// be the same mistake this class was written to correct.</b> The machine lock is held across
+    /// the whole turn — the collection, the report, and the update — and the update legitimately
+    /// includes a package download bounded at ten minutes. So a run can exceed the updater's
+    /// two-minute <c>LockWait</c>, and that is by design rather than an oversight: an updater that
+    /// cannot take the lock reports contention and tries again, which is a documented non-error,
+    /// whereas a download killed at two minutes would make large packages permanently
+    /// uninstallable on slow links. What this bound removes is the case with no such justification
+    /// — a sick osquery or a hung firewall command turning a two-second collection into minutes
+    /// for no benefit at all.
+    /// </para>
     /// </remarks>
     public static readonly TimeSpan Default = TimeSpan.FromSeconds(100);
 

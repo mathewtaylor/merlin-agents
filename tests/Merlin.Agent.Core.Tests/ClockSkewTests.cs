@@ -1,3 +1,4 @@
+using System.Globalization;
 using Merlin.Agent.Core.Crypto;
 using Xunit;
 
@@ -117,21 +118,46 @@ public sealed class ClockSkewTests
     }
 
     /// <summary>
-    /// A decade is still a clock; anything past it is not.
+    /// The machines whose clocks are actually wrong are the ones the bound must admit.
     /// </summary>
     /// <remarks>
-    /// A dead CMOS battery lands a machine in 2000 and a board with no RTC lands it at the epoch,
-    /// so the bound has to admit years — it is there to reject answers, not wrong clocks.
+    /// <b>These are named cases, not round numbers, because a bound expressed in years is easy to
+    /// pick too tight and impossible to notice.</b> The real causes are not drift — they are a
+    /// clock that never had the right time: a dead CMOS battery drops a machine to its BIOS
+    /// default, a board with no RTC starts at the Unix epoch, a FAT-era default is 1980. From this
+    /// test's own "now" those are decades out, and the first draft of the bound refused every one
+    /// of them — which would have meant the most common real cause of a wrong clock could never
+    /// learn its correction, and the machine would go silent for ever.
+    /// </remarks>
+    [Theory]
+    [InlineData("1970-01-01T00:00:00Z")]   // no RTC — the Unix epoch
+    [InlineData("1980-01-01T00:00:00Z")]   // FAT-era BIOS default
+    [InlineData("2000-01-01T00:00:00Z")]   // the classic dead-CMOS-battery landing
+    [InlineData("2015-01-01T00:00:00Z")]   // a board default a decade back
+    public void AClockThatNeverHadTheRightTimeIsStillCorrected(string machineClock)
+    {
+        DateTimeOffset wrong = DateTimeOffset.Parse(machineClock, CultureInfo.InvariantCulture);
+
+        // The machine's own clock is `wrong`; the server tells it the truth, which is `_now`.
+        Assert.True(
+            ClockSkew.TryLearn(_now.ToUnixTimeSeconds(), wrong, applied: 0, out long learned));
+
+        Assert.Equal(_now.ToUnixTimeSeconds() - wrong.ToUnixTimeSeconds(), learned);
+    }
+
+    /// <summary>
+    /// A <c>serverTime</c> near the end of the representable range is an answer, not a clock.
+    /// </summary>
+    /// <remarks>
+    /// This is what the bound is actually for: adopt it and the caller's own <c>AddSeconds</c>
+    /// throws on every subsequent run, before any request is built and therefore before anything
+    /// can relearn it.
     /// </remarks>
     [Fact]
-    public void ADecadeOutIsStillLearned()
+    public void ACorrectionOfCenturiesIsRefused()
     {
-        long nineYears = 9L * 365 * 24 * 3600;
-
-        Assert.True(ClockSkew.TryLearn(At(nineYears), _now, applied: 0, out long learned));
-        Assert.Equal(nineYears, learned);
-
-        Assert.False(ClockSkew.TryLearn(At(11L * 365 * 24 * 3600), _now, applied: 0, out _));
+        Assert.False(ClockSkew.TryLearn(At(200L * 365 * 24 * 3600), _now, applied: 0, out _));
+        Assert.False(ClockSkew.TryLearn(253402300799L, _now, applied: 0, out _));
     }
 
     /// <summary>

@@ -321,7 +321,9 @@ public sealed class UpdateClient : IDisposable
             return false;
         }
 
-        if (refusal is null || refusal.ServerTime <= 0)
+        // The RANGE of serverTime is ClockSkew's business, including the non-positive case — a
+        // second copy of half a rule here is the drift shape the extraction exists to prevent.
+        if (refusal is null)
         {
             return false;
         }

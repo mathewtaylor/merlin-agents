@@ -152,6 +152,46 @@ public sealed class ComponentSwapTests
         Assert.False(File.Exists(kit.Layout.PreviousPathOf(AgentComponent.Updater)));
     }
 
+    /// <summary>
+    /// A staged binary that runs but names no version is not installed.
+    /// </summary>
+    /// <remarks>
+    /// <b>The recorded version used to fall back to the ADVERTISED string, which is the operator's
+    /// own input.</b> That is the field the never-install-this-again rule compares against, so a
+    /// binary that identified itself as nothing was recorded as whatever Merlin had been told to
+    /// expect — and the mismatch warning could never fire, because the value it compares had just
+    /// been copied from the thing it is compared to. Execute-before-commit asks two questions, and
+    /// the second one is what is it.
+    /// </remarks>
+    [Fact]
+    public async Task AStagedBinaryThatNamesNoVersionIsNotInstalled()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "silent");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        // It RUNS — this is not the would-not-execute case — and says nothing.
+        ComponentSwapper swapper = new(
+            AgentComponent.Agent,
+            kit.Layout, http, UpdateTestKit.ProbeByPath(_ => "   "), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Contains("printed no version", result.Detail, StringComparison.Ordinal);
+
+        // The working binary is untouched, and nothing was recorded under a borrowed version.
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+        Assert.Null(result.InstalledVersion);
+    }
+
     [Fact]
     public async Task AnArchiveWithoutTheNamedComponentInstallsNothing()
     {

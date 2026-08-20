@@ -47,11 +47,31 @@ public static class ClockSkew
     /// The largest correction that is a wrong clock rather than a wrong answer.
     /// </summary>
     /// <remarks>
-    /// Ten years. A machine can be a decade out — a dead CMOS battery lands in 2000, and a fresh
-    /// board with no RTC lands at the epoch — but nothing beyond that is a clock, so nothing beyond
-    /// that is worth stamping a request with.
+    /// <para>
+    /// <b>A century, and the first draft's ten years refused the very machines this exists to
+    /// serve.</b> The cases worth naming are not drift — they are a clock that never had the right
+    /// time: a dead CMOS battery lands a machine at its BIOS default, a board with no RTC lands at
+    /// the Unix epoch, and a FAT-era default lands at 1980. From 2026 those are 26, 57 and 47 years
+    /// out. A ten-year bound refuses all three, so the single most common real cause of a badly
+    /// wrong clock could never learn its correction: refused for skew, declining to learn, refused
+    /// again, on every scheduled run for ever. That is the silent machine this bound was added to
+    /// prevent, reintroduced through the opposite door.
+    /// </para>
+    /// <para>
+    /// <b>The bound's job is to stop the correction being un-representable, not to judge how wrong
+    /// a clock may be.</b> What it must exclude is a <c>serverTime</c> near the end of the
+    /// representable range, which implies an offset of some eight thousand years and makes the
+    /// caller's own <c>AddSeconds</c> throw on every subsequent run. A century is two orders of
+    /// magnitude inside that limit and still excludes it completely.
+    /// </para>
+    /// <para>
+    /// <b>Loosening it does not buy an attacker a lasting denial either</b>, which is what makes
+    /// the trade one-sided: a correction pushed to fifty years is undone by the next genuine
+    /// refusal, because what is measured is the difference from the correction in force, not its
+    /// size.
+    /// </para>
     /// </remarks>
-    public const long MaximumPlausibleSeconds = 10L * 365 * 24 * 3600;
+    public const long MaximumPlausibleSeconds = 100L * 365 * 24 * 3600;
 
     /// <summary>
     /// A stored correction, or zero when it is not one.

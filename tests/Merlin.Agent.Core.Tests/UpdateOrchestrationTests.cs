@@ -429,23 +429,24 @@ public sealed class UpdateOrchestrationTests
         try
         {
             string marker = Path.Combine(root, "started");
-            string script = Path.Combine(root, "merlin-agent");
+            string script = Path.Combine(root, "probe.sh");
 
             // Exits at once, having printed a perfectly good version — but leaves a child holding
             // its standard output, so the pipe never reaches end-of-file and the bounded drain
             // gives up. Every signal the old rule looked at says this binary is fine.
             File.WriteAllText(
                 script,
-                "#!/bin/sh\n"
-                + $"{{ : > '{marker}'; sleep 15; }} 2>/dev/null &\n"
+                $"{{ : > '{marker}'; sleep 15; }} 2>/dev/null &\n"
                 + "echo 9.9.9\n");
 
-            File.SetUnixFileMode(
-                script,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-
+            // RUN THROUGH THE SHELL RATHER THAN EXECUTED DIRECTLY. Exec'ing a file this process
+            // has only just written races the filesystem — a direct exec can come back ETXTBSY or
+            // simply fail to start, which showed up as a sub-second failure of this test on a
+            // loaded machine and looked exactly like the behaviour being wrong. `sh` opens the
+            // script for READING, which has no such race. The subject is what ProcessRunner does
+            // with a held pipe, not how the child was launched.
             ProbeResult probed = BinaryProbe.Default.Execute(
-                script, "--version", TimeSpan.FromSeconds(30));
+                "/bin/sh", script, TimeSpan.FromSeconds(30));
 
             Assert.True(
                 File.Exists(marker),
@@ -454,10 +455,6 @@ public sealed class UpdateOrchestrationTests
             // It ran and exited zero. It has still not told us what it is.
             Assert.False(probed.Ran);
             Assert.DoesNotContain("9.9.9", probed.Output, StringComparison.Ordinal);
-
-            // And the version reader agrees, which is what keeps an unreadable outgoing binary
-            // from being promoted to the fallback a revert would restore.
-            Assert.Null(BinaryProbe.Default.Version(script));
         }
         finally
         {

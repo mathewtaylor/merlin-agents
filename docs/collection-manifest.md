@@ -126,10 +126,17 @@ collection is delegated to osquery in the first place.
 ## What a slow machine gives up
 
 A collection holds the agent's machine-wide lock for its whole duration, and the updater abandons
-that lock after two minutes and reports contention — so a collection that runs long is a window in
-which nothing on the machine can put a broken agent back. The whole collection is therefore bounded
-at 100 seconds, shared across the osquery version probe, the query pack and the host readings that
+that lock after two minutes and reports contention — so every minute a sick osquery costs is a
+minute in which nothing on the machine can put a broken agent back. The whole collection is
+therefore bounded at 100 seconds (plus up to 10 seconds of pipe drain for a step killed at the
+deadline), shared across the osquery version probe, the query pack and the host readings that
 follow it. A healthy collection takes two or three seconds; nothing legitimate approaches the bound.
+
+That bound covers the collection, not the whole lock hold: the report and the update turn are held
+under the same lock, and the update legitimately includes a package download bounded at ten
+minutes. A run may therefore exceed the updater's wait, which is by design — an updater that cannot
+take the lock reports contention and tries again, whereas a download killed at two minutes would
+make large packages permanently uninstallable on a slow link.
 
 **When it is reached, whatever has not run is reported as NOT OBSERVED** — the same null a missing
 table produces, never a negative reading. **The packs are therefore ordered security-posture first
