@@ -328,9 +328,25 @@ public sealed class UpdateClient : IDisposable
 
         long offset = (long)(DateTimeOffset.FromUnixTimeSeconds(refusal.ServerTime) - now).TotalSeconds;
 
-        // A one-second difference is not why a request was refused, and retrying every refusal
-        // would double the load a misconfigured fleet puts on the server.
-        if (Math.Abs(offset) < 30)
+        // MEASURED AGAINST THE CORRECTION ALREADY IN FORCE, never against zero. This asks one
+        // question — would applying what the server just told us actually move the stamp? — and
+        // asking it the other way is wrong in BOTH directions:
+        //
+        //  - a machine carrying a stale correction can never shed it. Once an hour of offset is
+        //    stored, every request is stamped an hour from this machine's own clock, so the day the
+        //    clock is FIXED that correction becomes the entire error. The server refuses, replies
+        //    with a time that matches our raw clock exactly, and the absolute offset it implies is
+        //    ZERO — which a "< 30" test reads as "not worth acting on". So it is refused again,
+        //    for ever, and the value it needs to forget is the one it is being told to forget.
+        //    That is a machine that silently stops reporting and stops updating, with no route back
+        //    on the machine itself;
+        //  - and a machine whose correction is RIGHT retries every refusal that was never about the
+        //    clock, because its large, correct offset always clears the threshold — which is
+        //    exactly the doubled load this guard was added to prevent.
+        //
+        // The difference answers both: near-zero means the stamp we already sent was what the
+        // server would have wanted, so the clock is not why it was refused.
+        if (Math.Abs(offset - ClockOffsetSeconds) < 30)
         {
             return false;
         }

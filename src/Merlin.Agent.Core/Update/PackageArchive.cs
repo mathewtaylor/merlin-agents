@@ -125,12 +125,21 @@ public static class PackageArchive
                 continue;
             }
 
-            if (entry.DataStream is not { } content)
+            // A NULL DataStream MEANS AN EMPTY ENTRY, NOT A MISSING ONE. TarReader only attaches
+            // a stream when the entry has a data section, so a zero-byte binary arrives as null —
+            // and skipping it would carry on searching and report "the package carries no
+            // merlin-agent", which is false and sends whoever reads it after the wrong fault. The
+            // extraction this replaced wrote the empty file, the probe then refused to execute it,
+            // and the swap failed saying exactly that. Keep the accurate verdict.
+            if (entry.DataStream is { } content)
             {
-                continue;
+                Extract(content, destinationPath);
+            }
+            else
+            {
+                File.WriteAllBytes(destinationPath, []);
             }
 
-            Extract(content, destinationPath);
             return true;
         }
 

@@ -369,8 +369,12 @@ public sealed class UpdateOrchestrationTests
         // exits the moment it has echoed.
         ProcessOutcome outcome = ProcessRunner.Run(
             "/bin/sh",
-            ["-c", "sleep 8 2>/dev/null & echo hello"],
-            TimeSpan.FromSeconds(10));
+            // Fifteen seconds against a five-second drain grace. The test still finishes in five —
+            // it ends when the drain gives up, not when the sleep does — so the margin is free, and
+            // a loaded machine cannot stall its way into the pipe closing early and passing for the
+            // wrong reason.
+            ["-c", "sleep 15 2>/dev/null & echo hello"],
+            TimeSpan.FromSeconds(30));
 
         // It started and exited cleanly. Everything the old rule looked at says "success".
         Assert.True(outcome.Started);
@@ -474,6 +478,114 @@ public sealed class UpdateOrchestrationTests
             {
                 Directory.Delete(Path.GetDirectoryName(directory)!, recursive: true);
             }
+        }
+    }
+
+    /// <summary>
+    /// A machine whose clock was WRONG and has since been FIXED corrects itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The stored offset outlives the fault it was learned for, and nothing else can clear
+    /// it.</b> Once a machine has recorded, say, an hour of correction, every request it signs is
+    /// stamped an hour away from its own clock — so the day somebody fixes the clock, or the laptop
+    /// syncs NTP for the first time in months, that correction becomes the entire error. The
+    /// request is refused for skew, and the refusal carries exactly what is needed to put it right.
+    /// </para>
+    /// <para>
+    /// <b>The guard on whether a correction is worth applying must compare it against the one
+    /// already in force, not against zero.</b> Asking only whether the NEW offset is small refuses
+    /// to learn precisely when the answer is "you no longer need one" — the machine keeps stamping
+    /// an hour out, is refused every time, and never reports or checks for an update again. There
+    /// is no path back on the machine itself: the value it needs to forget is the one it is being
+    /// told to forget.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AStaleClockOffsetIsUnlearnedOnceTheClockIsRight()
+    {
+        using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        DateTimeOffset now = new(2026, 8, 20, 3, 0, 0, TimeSpan.Zero);
+
+        // The server's clock and ours AGREE. The only thing wrong is the hour of correction this
+        // machine is still carrying from when they did not.
+        SkewHandler handler = new(now.ToUnixTimeSeconds());
+
+        using HttpClient http = new(handler) { BaseAddress = new Uri("https://isms.example.com/") };
+        using UpdateClient client = new(http, key, AgentVersionInfo.Current, 3600);
+
+        UpdateCheck answer = await client.CheckAsync(
+            Guid.NewGuid(), AgentRuntimeIdentifier.WindowsX64, now);
+
+        // It was refused once, relearned, and retried — rather than giving up because the
+        // correction it needs happens to be zero.
+        Assert.Equal(2, handler.Requests);
+        Assert.Equal(UpdateCheckStatus.NothingToDo, answer.Status);
+
+        // And the correction that no longer applies is GONE, so the next run starts clean. Leaving
+        // 3600 here is a machine that never speaks to Merlin again.
+        Assert.Equal(0, answer.ClockOffsetSeconds);
+        Assert.Equal(0, client.ClockOffsetSeconds);
+    }
+
+    /// <summary>
+    /// A refusal that is not about the clock does not cost a second request.
+    /// </summary>
+    /// <remarks>
+    /// The other half of the same guard: when the correction in force is already right, the server's
+    /// time matches the stamp and there is nothing to relearn. Retrying every refusal would double
+    /// the load a misconfigured fleet puts on the server for no gain.
+    /// </remarks>
+    [Fact]
+    public async Task ARefusalThatIsNotAboutTheClockIsNotRetried()
+    {
+        using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        DateTimeOffset now = new(2026, 8, 20, 3, 0, 0, TimeSpan.Zero);
+
+        // This machine really is an hour slow and really is correcting for it, so the stamp the
+        // server saw was right and its clock agrees with the corrected one.
+        SkewHandler handler = new(now.AddSeconds(3600).ToUnixTimeSeconds());
+
+        using HttpClient http = new(handler) { BaseAddress = new Uri("https://isms.example.com/") };
+        using UpdateClient client = new(http, key, AgentVersionInfo.Current, 3600);
+
+        UpdateCheck answer = await client.CheckAsync(
+            Guid.NewGuid(), AgentRuntimeIdentifier.WindowsX64, now);
+
+        Assert.Equal(1, handler.Requests);
+        Assert.Equal(UpdateCheckStatus.Refused, answer.Status);
+        Assert.Equal(3600, client.ClockOffsetSeconds);
+    }
+
+    /// <summary>Refuses the first request for skew, then answers 204.</summary>
+    private sealed class SkewHandler(long serverTime) : HttpMessageHandler
+    {
+        public int Requests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Requests++;
+
+            if (Requests > 1)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent)
+                {
+                    RequestMessage = request,
+                });
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                RequestMessage = request,
+                Content = new StringContent(
+                    $"{{\"message\":\"timestamp outside tolerance\",\"serverTime\":{serverTime}}}",
+                    Encoding.UTF8,
+                    "application/json"),
+            });
         }
     }
 

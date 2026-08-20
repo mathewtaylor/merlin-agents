@@ -82,8 +82,8 @@ public sealed class ReportClient : IDisposable
             // whatever address the state file names, is buffered whole by default, and is read
             // into a string — two bytes of memory per byte on the wire — inside a process running
             // as SYSTEM or root. Every answer this endpoint gives is a few hundred bytes.
-            // Exceeding it raises HttpRequestException, which the callers already treat as a
-            // refused request, so it adds no new failure mode.
+            // Exceeding it raises HttpRequestException, which every caller here now turns into a
+            // refused request rather than letting it escape, so it adds no new failure mode.
             MaxResponseContentBufferSize = 64 * 1024,
         };
 
@@ -118,7 +118,26 @@ public sealed class ReportClient : IDisposable
             using HttpRequestMessage message = Build("api/agent/enrol", body, deviceId: null, now);
             message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", enrolmentKey);
 
-            using HttpResponseMessage response = await _http.SendAsync(message).ConfigureAwait(false);
+            HttpResponseMessage sent;
+
+            try
+            {
+                sent = await _http.SendAsync(message).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+            {
+                // AN UNREACHABLE MERLIN IS AN OUTCOME, not a crash. It reads as one to the person
+                // typing `enrol` — who is standing in front of the machine, often on a network
+                // that is the actual problem. The response-size cap also surfaces here, and a
+                // captive portal's HTML login page is exactly what trips it: without this the
+                // operator was told "Cannot write more bytes to the buffer than the configured
+                // maximum buffer size: 65536" rather than that the server could not be reached.
+                return (
+                    new TransportResult(false, $"Merlin could not be reached: {exception.Message}", null),
+                    null);
+            }
+
+            using HttpResponseMessage response = sent;
             string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
@@ -213,7 +232,24 @@ public sealed class ReportClient : IDisposable
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, WireJsonContext.Default.AgentRotateRequest);
 
         using HttpRequestMessage message = Build("api/agent/rotate", body, deviceId, now);
-        using HttpResponseMessage response = await _http.SendAsync(message).ConfigureAwait(false);
+
+        HttpResponseMessage sent;
+
+        try
+        {
+            sent = await _http.SendAsync(message).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+            // As in EnrolAsync. The caller already answers a failure with "the existing key is
+            // unchanged and this machine keeps reporting", which is the true and reassuring thing
+            // to say about an outage — and is what an escaping exception replaced with a raw
+            // transport message.
+            return new TransportResult(
+                false, $"Merlin could not be reached: {exception.Message}", null);
+        }
+
+        using HttpResponseMessage response = sent;
         string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
         return response.IsSuccessStatusCode
@@ -292,10 +328,25 @@ public sealed class ReportClient : IDisposable
         DateTimeOffset serverTime = DateTimeOffset.FromUnixTimeSeconds(refusal.ServerTime);
         long offset = (long)(serverTime - now).TotalSeconds;
 
-        // Only worth retrying when the clock is actually the likely cause. A one-second difference
-        // is not why a request was refused, and retrying every refusal would double the load a
-        // genuinely misconfigured fleet puts on the server.
-        if (Math.Abs(offset) < 30)
+        // MEASURED AGAINST THE CORRECTION ALREADY IN FORCE, never against zero. This asks one
+        // question — would applying what the server just told us actually move the stamp? — and
+        // asking it the other way is wrong in BOTH directions:
+        //
+        //  - a machine carrying a stale correction can never shed it. Once an hour of offset is
+        //    stored, every request is stamped an hour from this machine's own clock, so the day the
+        //    clock is FIXED that correction becomes the entire error. The server refuses, replies
+        //    with a time that matches our raw clock exactly, and the absolute offset it implies is
+        //    ZERO — which a "< 30" test reads as "not worth acting on". So it is refused again,
+        //    for ever, and the value it needs to forget is the one it is being told to forget.
+        //    That is a machine that silently stops reporting and stops updating, with no route back
+        //    on the machine itself;
+        //  - and a machine whose correction is RIGHT retries every refusal that was never about the
+        //    clock, because its large, correct offset always clears the threshold — which is
+        //    exactly the doubled load this guard was added to prevent.
+        //
+        // The difference answers both: near-zero means the stamp we already sent was what the
+        // server would have wanted, so the clock is not why it was refused.
+        if (Math.Abs(offset - ClockOffsetSeconds) < 30)
         {
             return false;
         }

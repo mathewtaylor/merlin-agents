@@ -222,7 +222,11 @@ is logged and audited server-side.
 
 `serverTime` is the one thing safely returned: a machine with a wrong clock cannot otherwise
 discover why it is refused, and it reveals nothing that the HTTP `Date` header does not. The agent
-applies the offset and retries once when the difference exceeds 30 seconds.
+retries once, having relearned its offset, when the correction `serverTime` implies differs by more
+than 30 seconds from the one it is ALREADY applying — which is the test that lets a machine both
+acquire a correction and, once its clock is fixed, give one up. Comparing the implied correction
+against zero instead would leave a machine that has corrected its clock stamping the old offset for
+ever, refused every time, with nothing on the machine able to clear it.
 
 **404** means the deployment does not have the agent surface switched on.
 

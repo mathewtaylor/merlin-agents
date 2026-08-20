@@ -452,12 +452,20 @@ public static class Program
             // cannot see it from here" — came out as "there is nothing here". An employee running
             // this to check what their machine sends was told the agent was not enrolled while it
             // was reporting perfectly well.
+            // THREE ANSWERS, NOT TWO. ReadFrom also returns null for a state file it cannot
+            // PARSE — a truncated write, a half-restored backup, a hand edit — and calling that
+            // "not enrolled" is the same lie as calling a permissions failure one, one branch
+            // over. The remedies are entirely different: run as root, re-enrol, or nothing at all.
             Console.WriteLine(
                 StateDirectoryIsUnreadable()
                     ? "The state directory exists but cannot be read from this account. Run this "
                         + "as root (or as Administrator on Windows): it is restricted to the "
                         + "superuser because the device key lives beside the state file."
-                    : "This machine has not enrolled.");
+                    : File.Exists(AgentState.StatePath)
+                        ? "A state file exists but could not be read — it is most likely corrupt. "
+                            + "Re-enrol this machine to rebuild it; Merlin treats a re-enrolment "
+                            + "with the same key as the same device."
+                        : "This machine has not enrolled.");
 
             // BOTH COMPONENTS, even here. "Not enrolled" and "the updater was never installed" are
             // different faults with different fixes, and a machine that is silent is exactly when
@@ -508,15 +516,6 @@ public static class Program
     }
 
     /// <summary>
-    /// Prints the companion updater's version and what the last swap on this machine did.
-    /// </summary>
-    /// <remarks>
-    /// <b>"not installed" and "would not run" are told apart</b>, because the remedies differ: the
-    /// first is a package built before auto-update shipped and is fixed by reinstalling, the second
-    /// is a broken binary that the agent itself will put back. Collapsing them into one line would
-    /// leave an operator guessing at which they are looking at.
-    /// </remarks>
-    /// <summary>
     /// Whether the state directory is there but shut to this account.
     /// </summary>
     /// <remarks>
@@ -553,11 +552,19 @@ public static class Program
 
     /// <summary>Names both installed components, with or without a state file.</summary>
     /// <remarks>
+    /// <para>
+    /// <b>"not installed" and "would not run" are told apart</b>, because the remedies differ: the
+    /// first is a package built before auto-update shipped and is fixed by reinstalling, the second
+    /// is a broken binary that the agent itself will put back. Collapsing them into one line would
+    /// leave an operator guessing at which they are looking at.
+    /// </para>
+    /// <para>
     /// <b>Which binaries are on this machine is a fact about the DISK, not about enrolment</b> —
     /// and the two questions an operator brings to a machine that is not reporting are "is it
     /// enrolled" and "did the updater ever get installed". Printing the components only after the
     /// state file was read answered the second only when the first was already fine, which is the
     /// case where nobody needed to ask.
+    /// </para>
     /// </remarks>
     private static void PrintComponents()
     {
@@ -571,6 +578,9 @@ public static class Program
         Console.WriteLine($"Updater:     {updater}");
     }
 
+    /// <summary>
+    /// Prints the companion updater's version and what the last swap on this machine did.
+    /// </summary>
     private static void PrintUpdaterStatus(AgentStateData state)
     {
         PrintComponents();
