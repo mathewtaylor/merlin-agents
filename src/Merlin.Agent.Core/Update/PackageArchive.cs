@@ -150,9 +150,21 @@ public static class PackageArchive
     /// Counts an entry against <see cref="MaximumEntries"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>An archive is a handful of files, and a directory of millions is not a package.</b> The
     /// download cap bounds the COMPRESSED bytes, and a central directory of empty entries costs
-    /// almost nothing to compress while costing real time to walk.
+    /// almost nothing to compress while costing real time to walk. The real package carries two
+    /// binaries, three query manifests and a directory entry.
+    /// </para>
+    /// <para>
+    /// <b>It bounds the walk for TAR and only the matching for ZIP.</b> <c>TarReader</c> is
+    /// genuinely streaming, so refusing at the 513th entry means the 513th is the last one read.
+    /// <c>ZipArchive.Entries</c> parses the entire central directory into memory before the loop
+    /// begins, so by the time this refuses, the cost it is refusing has already been paid. Worth
+    /// knowing rather than working around: the download cap already bounds those bytes, and the
+    /// value here is that the refusal is uniform and the tar path — the one used on both Unix
+    /// targets — is genuinely bounded.
+    /// </para>
     /// </remarks>
     private static void Count(ref int seen)
     {
@@ -185,6 +197,13 @@ public static class PackageArchive
     /// <para>
     /// It stands BEHIND the SHA-256 pin and the compile-time host allowlist, both of which an
     /// attacker must defeat first. That is what makes it defence in depth rather than the control.
+    /// </para>
+    /// <para>
+    /// <b>It does NOT carry the archive's Unix mode across, where <c>ExtractToFile</c> did.</b>
+    /// Every caller today follows the extraction with <c>MakeExecutable</c> — before the probe and
+    /// again after the commit move — so the executable bit is restored on every path and nothing
+    /// depends on the archive's own mode. A future caller that skipped that step would get a file
+    /// it cannot run, which is why this is stated rather than left to be discovered.
     /// </para>
     /// </remarks>
     private static void Extract(Stream content, string destinationPath)

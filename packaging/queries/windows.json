@@ -4,50 +4,22 @@
     "",
     "THIS FILE IS THE COMPLETE LIST OF WHAT THE AGENT READS. Every query below runs through",
     "osqueryi and nothing else is collected. An administrator can paste any of them into",
-    "osqueryi on their own machine and get byte-identical output — which is a far stronger",
+    "osqueryi on their own machine and get byte-identical output \u2014 which is a far stronger",
     "assurance than reading the agent's source, and is the main reason collection is delegated",
     "to osquery rather than hand-rolled.",
     "",
     "NOTHING HERE READS WHO IS SIGNED IN. There is no query for the interactive user, the",
     "session, the console owner or any mail address. The entra_join query is the one place a",
     "user field is even nearby, and it names the two values it wants so the rest cannot be",
-    "returned — see its own comment.",
+    "returned \u2014 see its own comment.",
     "",
     "A query that fails or returns nothing produces a NULL reading, never a false one. Merlin",
-    "treats null as 'not observed' and will not raise a nonconformity from it."
+    "treats null as 'not observed' and will not raise a nonconformity from it.",
+    "",
+    "QUERIES RUN IN THE ORDER LISTED HERE, AND THE ORDER IS DELIBERATE. A collection is bounded so it cannot hold the machine lock past the point where the updater gives up waiting for it, and on a machine where osquery answers slowly that bound is reached before the end of this list. Whatever is left is reported as NOT OBSERVED, so the security-posture queries come first and the inventory ones last: losing a hostname degrades a device page, while losing disk encryption or the firewall loses the reading the ISMS exists to take."
   ],
   "version": 1,
   "queries": {
-    "system_info": {
-      "sql": "SELECT hostname, hardware_serial, hardware_vendor, hardware_model FROM system_info;",
-      "purpose": "Machine identity, and the serial used to reconcile against the asset register."
-    },
-    "os_version": {
-      "sql": "SELECT name, version, build, platform FROM os_version;",
-      "purpose": "Operating system name, version and build — what end-of-support is judged against."
-    },
-    "os_edition": {
-      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\EditionID';",
-      "purpose": "Edition (Home / Pro / Server). Gates which controls can physically apply — a Home machine cannot run BitLocker."
-    },
-    "machine_guid": {
-      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid';",
-      "purpose": "Stable machine identifier that survives a rename."
-    },
-    "chassis": {
-      "sql": "SELECT chassis_types FROM chassis_info;",
-      "purpose": "Laptop / desktop / server, used to pre-fill an asset record."
-    },
-    "entra_join": {
-      "$comment": [
-        "THE PRIVACY-CRITICAL QUERY. The CloudDomainJoin key also contains user-identifying",
-        "values on some machines. This query names exactly the two it wants in its WHERE clause,",
-        "so the others are never returned to the agent at all — the restriction is enforced by",
-        "the query rather than by the agent remembering to ignore them."
-      ],
-      "sql": "SELECT name, data FROM registry WHERE key LIKE 'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\CloudDomainJoin\\JoinInfo\\%' AND name IN ('DeviceId', 'TenantId');",
-      "purpose": "The machine's Entra device id — the exact join key for fleet coverage. Absent on a workgroup machine, which is a true fact about the machine."
-    },
     "bitlocker": {
       "sql": "SELECT drive_letter, protection_status, conversion_status, encryption_method, percentage_encrypted FROM bitlocker_info;",
       "purpose": "Per-volume disk encryption state, including Windows Home Device Encryption."
@@ -64,21 +36,25 @@
       "sql": "SELECT path, data FROM registry WHERE path LIKE 'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\%Profile\\EnableFirewall';",
       "purpose": "Whether each firewall profile (domain, private, public) is enabled."
     },
-    "inactivity_timeout": {
-      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\InactivityTimeoutSecs';",
-      "purpose": "The machine-wide inactivity lock timeout (A.7.7 clear screen)."
-    },
     "secure_boot": {
       "sql": "SELECT secure_boot FROM secureboot;",
       "purpose": "Whether Secure Boot is enabled."
     },
     "tpm": {
       "sql": "SELECT activated, enabled, spec_version FROM tpm_info;",
-      "purpose": "Whether a TPM is present and usable — the precondition for a non-exportable signing key."
+      "purpose": "Whether a TPM is present and usable \u2014 the precondition for a non-exportable signing key."
+    },
+    "inactivity_timeout": {
+      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\InactivityTimeoutSecs';",
+      "purpose": "The machine-wide inactivity lock timeout (A.7.7 clear screen)."
     },
     "patches": {
       "sql": "SELECT hotfix_id, installed_on FROM patches ORDER BY installed_on DESC LIMIT 5;",
-      "purpose": "When an update was last installed. A count of PENDING updates is not collected in v1 — see docs/collection-manifest.md."
+      "purpose": "When an update was last installed. A count of PENDING updates is not collected in v1 \u2014 see docs/collection-manifest.md."
+    },
+    "os_version": {
+      "sql": "SELECT name, version, build, platform FROM os_version;",
+      "purpose": "Operating system name, version and build \u2014 what end-of-support is judged against."
     },
     "local_admins": {
       "$comment": [
@@ -92,6 +68,32 @@
     "system_drive": {
       "sql": "SELECT device_id, free_space, size FROM logical_drives WHERE type = 'Fixed' AND device_id = 'C:';",
       "purpose": "Free space on the system volume (A.8.6 capacity)."
+    },
+    "system_info": {
+      "sql": "SELECT hostname, hardware_serial, hardware_vendor, hardware_model FROM system_info;",
+      "purpose": "Machine identity, and the serial used to reconcile against the asset register."
+    },
+    "os_edition": {
+      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\EditionID';",
+      "purpose": "Edition (Home / Pro / Server). Gates which controls can physically apply \u2014 a Home machine cannot run BitLocker."
+    },
+    "machine_guid": {
+      "sql": "SELECT data FROM registry WHERE path = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid';",
+      "purpose": "Stable machine identifier that survives a rename."
+    },
+    "chassis": {
+      "sql": "SELECT chassis_types FROM chassis_info;",
+      "purpose": "Laptop / desktop / server, used to pre-fill an asset record."
+    },
+    "entra_join": {
+      "$comment": [
+        "THE PRIVACY-CRITICAL QUERY. The CloudDomainJoin key also contains user-identifying",
+        "values on some machines. This query names exactly the two it wants in its WHERE clause,",
+        "so the others are never returned to the agent at all \u2014 the restriction is enforced by",
+        "the query rather than by the agent remembering to ignore them."
+      ],
+      "sql": "SELECT name, data FROM registry WHERE key LIKE 'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\CloudDomainJoin\\JoinInfo\\%' AND name IN ('DeviceId', 'TenantId');",
+      "purpose": "The machine's Entra device id \u2014 the exact join key for fleet coverage. Absent on a workgroup machine, which is a true fact about the machine."
     }
   }
 }

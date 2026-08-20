@@ -420,7 +420,8 @@ public static class Program
 
                 if (!report.Succeeded)
                 {
-                    Console.Error.WriteLine($"Report refused: {report.Detail}");
+                    // As above: a report that never reached Merlin was not refused by it.
+                    Console.Error.WriteLine($"Report did not complete: {report.Detail}");
                     return 1;
                 }
 
@@ -824,7 +825,10 @@ public static class Program
 
             if (!result.Succeeded)
             {
-                Console.Error.WriteLine($"Rotation refused: {result.Detail}");
+                // NOT "refused" — an unreachable Merlin never got the chance to refuse anything,
+                // and this codebase draws exactly that distinction everywhere else. The detail line
+                // says which it was; the headline should not assert a decision nobody made.
+                Console.Error.WriteLine($"Rotation did not complete: {result.Detail}");
                 Console.Error.WriteLine("The existing key is unchanged and this machine keeps reporting.");
                 return 1;
             }
@@ -912,6 +916,14 @@ public static class Program
     /// </remarks>
     private static AgentReportPayload Collect()
     {
+        // ONE DEADLINE FOR THE WHOLE COLLECTION, created before the first external process and
+        // shared by every phase. All of this runs while the agent holds the machine-wide lock, and
+        // the updater gives that lock two minutes before it reports contention and leaves — so a
+        // collection that outlasts the wait is a window in which nothing on this machine can put a
+        // broken agent back. Bounding one phase is what makes that property look established
+        // without establishing it.
+        CollectionDeadline deadline = new();
+
         string? osquery = OsqueryRunner.Locate();
         OsqueryResults results;
         string? osqueryVersion = null;
@@ -929,7 +941,7 @@ public static class Program
         }
         else
         {
-            OsqueryRunner runner = new(osquery, TimeSpan.FromSeconds(30));
+            OsqueryRunner runner = new(osquery, TimeSpan.FromSeconds(30), deadline);
             osqueryVersion = runner.Version();
 
             results = runner.RunAll(
@@ -946,7 +958,7 @@ public static class Program
             _ => LinuxNormaliser.ToPayload(results, now, Version, osqueryVersion),
         };
 
-        return HostReader.Read().MergeInto(payload);
+        return HostReader.Read(deadline).MergeInto(payload);
     }
 
     private static string? ArgumentValue(string[] args, string name)

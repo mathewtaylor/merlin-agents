@@ -32,25 +32,24 @@ public sealed class OsqueryRunner
 
     private readonly string _osqueryPath;
     private readonly TimeSpan _timeout;
-    private readonly TimeSpan _budget;
+    private readonly CollectionDeadline _deadline;
 
     /// <summary>Initialises a new instance of the <see cref="OsqueryRunner"/> class.</summary>
     /// <param name="osqueryPath">Full path to <c>osqueryi.exe</c>.</param>
     /// <param name="timeout">How long a single query may take.</param>
-    /// <param name="budget">
-    /// How long the WHOLE pack may take. <b>A per-query timeout does not bound a collection</b> —
-    /// the Windows pack holds sixteen queries, so a machine whose osquery hangs on every one of
-    /// them multiplied a thirty-second timeout into minutes, all of it while holding the
-    /// machine-wide lock. The updater waits two minutes for that lock and then reports contention,
-    /// so a sick osquery quietly starved the one component able to put a broken agent back. Ninety
-    /// seconds sits comfortably inside that wait; a collection that cannot finish in it has
-    /// nothing useful left to say.
+    /// <param name="deadline">
+    /// The bound on the WHOLE collection, shared with everything else that runs under the same
+    /// machine lock. <b>It is passed in rather than created here precisely because a per-loop
+    /// budget is the version of this that does not work</b> — the version probe below and the
+    /// supplemental host readings that follow the pack are part of the same lock hold, so a bound
+    /// that covers only this class leaves them outside it and the property still fails. Null
+    /// creates one, for a caller with nothing else to coordinate with.
     /// </param>
-    public OsqueryRunner(string osqueryPath, TimeSpan timeout, TimeSpan? budget = null)
+    public OsqueryRunner(string osqueryPath, TimeSpan timeout, CollectionDeadline? deadline = null)
     {
         _osqueryPath = osqueryPath;
         _timeout = timeout;
-        _budget = budget ?? TimeSpan.FromSeconds(90);
+        _deadline = deadline ?? new CollectionDeadline();
     }
 
     /// <summary>
@@ -134,14 +133,9 @@ public sealed class OsqueryRunner
 
         OsqueryResults results = new();
 
-        // MONOTONIC, not wall clock. A machine coming back from sleep is exactly when a scheduled
-        // collection fires and exactly when DateTime.UtcNow can step, and a budget that a clock
-        // correction can extend is not a budget.
-        long deadline = Environment.TickCount64 + (long)_budget.TotalMilliseconds;
-
         foreach ((string name, string sql) in queries)
         {
-            if (Environment.TickCount64 >= deadline)
+            if (_deadline.Passed)
             {
                 // NOT OBSERVED, never a false reading — the same answer a missing table gives, and
                 // the normaliser already turns it into a null rather than a negative. Reported per
@@ -182,7 +176,12 @@ public sealed class OsqueryRunner
         // the parent never reaches the timeout at all. It matters more than a dead run, because a
         // collection holds the machine-wide lock: a wedged osqueryi means the updater can never
         // take that lock and can never put a broken agent back, and the machine goes silent.
-        ProcessOutcome outcome = ProcessRunner.Run(_osqueryPath, arguments, _timeout);
+        // CLAMPED, not merely gated. Checking only whether there is time to START a query lets the
+        // last one overshoot by its whole timeout — thirty seconds past a bound chosen to fit
+        // inside the updater's lock wait, which is the difference between a bound that holds and
+        // one that nearly does.
+        ProcessOutcome outcome = ProcessRunner.Run(
+            _osqueryPath, arguments, _deadline.Clamp(_timeout));
 
         if (!outcome.Started)
         {
@@ -196,11 +195,18 @@ public sealed class OsqueryRunner
             return (null, "timed out");
         }
 
-        return outcome.ExitCode == 0
+        // Succeeded, NOT a hand-rolled exit-code test. It also requires that standard output was
+        // read to the END, which matters here: a truncated read leaves the JSON empty, and empty
+        // JSON is not "osquery returned no rows" — it is "we never saw what it returned". The
+        // deserialise below would turn it into a not-observed reading by accident; this makes it
+        // one on purpose, and says why.
+        return outcome.Succeeded
             ? (outcome.StandardOutput, null)
-            : (null, string.IsNullOrWhiteSpace(outcome.StandardError)
-                ? $"exit code {outcome.ExitCode}"
-                : outcome.StandardError.Trim());
+            : (null, !outcome.OutputComplete
+                ? "its output could not be read to the end"
+                : string.IsNullOrWhiteSpace(outcome.StandardError)
+                    ? $"exit code {outcome.ExitCode}"
+                    : outcome.StandardError.Trim());
     }
 }
 

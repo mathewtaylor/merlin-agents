@@ -28,14 +28,27 @@ public static class HostReader
     private static readonly TimeSpan _timeout = TimeSpan.FromSeconds(10);
 
     /// <summary>Reads the supplemental signals for the host platform.</summary>
+    /// <remarks>
+    /// <b>These run under the same machine lock as the query pack, so they share its deadline.</b>
+    /// They are the phase most easily forgotten when a collection is bounded — they sit after the
+    /// pack rather than inside it — and on Linux they are also the most expensive, running up to
+    /// three separate firewall front-ends at ten seconds each. A bound that stops at the pack is a
+    /// bound the updater can still be starved past.
+    /// </remarks>
+    /// <param name="deadline">The bound on the whole collection.</param>
     /// <returns>The readings; every field is <c>null</c> where nothing could be read.</returns>
-    public static SupplementalReadings Read() => AgentPlatformInfo.Current switch
+    public static SupplementalReadings Read(CollectionDeadline deadline)
     {
-        AgentOs.Windows when OperatingSystem.IsWindows() => ReadWindows(),
-        AgentOs.MacOs => ReadMacOs(),
-        AgentOs.Linux => ReadLinux(),
-        _ => new SupplementalReadings(),
-    };
+        ArgumentNullException.ThrowIfNull(deadline);
+
+        return AgentPlatformInfo.Current switch
+        {
+            AgentOs.Windows when OperatingSystem.IsWindows() => ReadWindows(deadline),
+            AgentOs.MacOs => ReadMacOs(deadline),
+            AgentOs.Linux => ReadLinux(deadline),
+            _ => new SupplementalReadings(),
+        };
+    }
 
     /// <summary>
     /// Reads the Windows local password policy from <c>net accounts</c>.
@@ -56,9 +69,9 @@ public static class HostReader
     /// </para>
     /// </remarks>
     [SupportedOSPlatform("windows")]
-    private static SupplementalReadings ReadWindows()
+    private static SupplementalReadings ReadWindows(CollectionDeadline deadline)
     {
-        string? output = CommandRunner.Run("net", ["accounts"], _timeout);
+        string? output = CommandRunner.Run("net", ["accounts"], deadline.Clamp(_timeout));
 
         if (output is null)
         {
@@ -112,9 +125,9 @@ public static class HostReader
     /// machine that this reading cannot establish, so the length is reported only when it is
     /// positively found.
     /// </remarks>
-    private static SupplementalReadings ReadMacOs()
+    private static SupplementalReadings ReadMacOs(CollectionDeadline deadline)
     {
-        string? output = CommandRunner.Run("/usr/bin/pwpolicy", ["-getaccountpolicies"], _timeout);
+        string? output = CommandRunner.Run("/usr/bin/pwpolicy", ["-getaccountpolicies"], deadline.Clamp(_timeout));
 
         return output is null
             ? new SupplementalReadings()
@@ -130,14 +143,14 @@ public static class HostReader
     /// directory. Each is independently <c>null</c>-able: a machine with no EFI variables still
     /// reports its password policy, and one with no <c>pwquality</c> still reports its TPM.
     /// </remarks>
-    private static SupplementalReadings ReadLinux()
+    private static SupplementalReadings ReadLinux(CollectionDeadline deadline)
     {
         (int? minimumLength, bool? complexity) = LinuxPasswordPolicy();
 
         return new SupplementalReadings(
             PasswordMinimumLength: minimumLength,
             PasswordComplexityEnabled: complexity,
-            FirewallEnabled: LinuxFirewall(),
+            FirewallEnabled: LinuxFirewall(deadline),
             SecureBootEnabled: LinuxSecureBoot(),
             TpmPresent: LinuxTpmVersion() is not null,
             TpmVersion: LinuxTpmVersion(),
@@ -193,23 +206,23 @@ public static class HostReader
     /// none of the three reports not-observed rather than "off", because plenty of correctly
     /// firewalled machines sit behind a rule set none of these tools can see.
     /// </remarks>
-    private static bool? LinuxFirewall()
+    private static bool? LinuxFirewall(CollectionDeadline deadline)
     {
-        string? ufw = CommandRunner.Run("/usr/sbin/ufw", ["status"], _timeout);
+        string? ufw = CommandRunner.Run("/usr/sbin/ufw", ["status"], deadline.Clamp(_timeout));
 
         if (ufw is not null)
         {
             return ufw.Contains("Status: active", StringComparison.OrdinalIgnoreCase);
         }
 
-        string? firewalld = CommandRunner.Run("/usr/bin/firewall-cmd", ["--state"], _timeout);
+        string? firewalld = CommandRunner.Run("/usr/bin/firewall-cmd", ["--state"], deadline.Clamp(_timeout));
 
         if (firewalld is not null)
         {
             return firewalld.Trim().Equals("running", StringComparison.OrdinalIgnoreCase);
         }
 
-        string? nft = CommandRunner.Run("/usr/sbin/nft", ["list", "ruleset"], _timeout);
+        string? nft = CommandRunner.Run("/usr/sbin/nft", ["list", "ruleset"], deadline.Clamp(_timeout));
 
         // An empty ruleset is an observed absence of filtering; a command that would not run at all
         // tells us nothing.

@@ -364,6 +364,12 @@ public sealed class UpdateOrchestrationTests
             return;
         }
 
+        // The grandchild touches a marker before it sleeps, so the test can say whether the case
+        // under test actually AROSE. Without it a failure is silent about its own cause: an
+        // incomplete read and a grandchild that never started look identical from the assertions,
+        // and the second is a broken test rather than a broken runner.
+        string marker = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+
         // `sleep` inherits stdout — the pipe — and sends its own stderr to /dev/null, so standard
         // error reaches end-of-file at once and only the OUTPUT drain times out. The shell itself
         // exits the moment it has echoed.
@@ -373,17 +379,151 @@ public sealed class UpdateOrchestrationTests
             // it ends when the drain gives up, not when the sleep does — so the margin is free, and
             // a loaded machine cannot stall its way into the pipe closing early and passing for the
             // wrong reason.
-            ["-c", "sleep 15 2>/dev/null & echo hello"],
+            ["-c", $"{{ : > '{marker}'; sleep 15; }} 2>/dev/null & echo hello"],
             TimeSpan.FromSeconds(30));
 
         // It started and exited cleanly. Everything the old rule looked at says "success".
-        Assert.True(outcome.Started);
+        Assert.True(outcome.Started, "the shell did not start, so the case under test never arose");
+        Assert.True(
+            File.Exists(marker),
+            "the grandchild never started, so nothing was holding the output pipe open");
         Assert.True(outcome.Exited);
         Assert.Equal(0, outcome.ExitCode);
 
         // And yet the output was never read to the end, so it is not a reading.
         Assert.False(outcome.OutputComplete);
         Assert.False(outcome.Succeeded);
+
+        File.Delete(marker);
+    }
+
+    /// <summary>
+    /// A binary whose version could not be READ has not proved itself, however cleanly it exited.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the execute-before-commit gate, and executing is only half of what it asks.</b>
+    /// The other half is "and what is it?" — the swap records the version the binary states, and
+    /// that string is what the never-install-this-again rule later compares against. A read that
+    /// never reached end-of-file leaves the output empty while the process exited zero, and the
+    /// caller's <c>FirstLine(output) ?? version</c> then quietly records the ADVERTISED version as
+    /// though the binary had said it. A silent substitution in that field is worse than a refused
+    /// swap: the swap can be retried, and a wrong recorded version cannot be noticed.
+    /// </para>
+    /// <para>
+    /// Driven through <see cref="BinaryProbe.Default"/> — the real one — because the seam every
+    /// other test uses replaces exactly the code under test here.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ABinaryWhoseOutputCannotBeReadHasNotProvedItself()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string root = Path.Combine(Path.GetTempPath(), "merlin-probe", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            string marker = Path.Combine(root, "started");
+            string script = Path.Combine(root, "merlin-agent");
+
+            // Exits at once, having printed a perfectly good version — but leaves a child holding
+            // its standard output, so the pipe never reaches end-of-file and the bounded drain
+            // gives up. Every signal the old rule looked at says this binary is fine.
+            File.WriteAllText(
+                script,
+                "#!/bin/sh\n"
+                + $"{{ : > '{marker}'; sleep 15; }} 2>/dev/null &\n"
+                + "echo 9.9.9\n");
+
+            File.SetUnixFileMode(
+                script,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            ProbeResult probed = BinaryProbe.Default.Execute(
+                script, "--version", TimeSpan.FromSeconds(30));
+
+            Assert.True(
+                File.Exists(marker),
+                "the child never started, so nothing was holding the output pipe open");
+
+            // It ran and exited zero. It has still not told us what it is.
+            Assert.False(probed.Ran);
+            Assert.DoesNotContain("9.9.9", probed.Output, StringComparison.Ordinal);
+
+            // And the version reader agrees, which is what keeps an unreadable outgoing binary
+            // from being promoted to the fallback a revert would restore.
+            Assert.Null(BinaryProbe.Default.Version(script));
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+                // A leftover temporary directory must not replace a real assertion failure.
+            }
+        }
+    }
+
+    /// <summary>
+    /// One deadline bounds a whole collection, and every step clamps to what is left of it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Gating ENTRY to a step is not the same as bounding it, and the difference is a step's
+    /// whole timeout.</b> A collection holds the machine-wide lock, and the updater abandons that
+    /// lock after two minutes — so the bound has to hold across the version probe, the query pack
+    /// and the supplemental host readings together, not within any one of them. Clamping is what
+    /// stops the last step starting a millisecond inside the deadline and running thirty seconds
+    /// past it.
+    /// </remarks>
+    [Fact]
+    public void ACollectionDeadlineBoundsEveryStepAndNotJustTheirStarts()
+    {
+        CollectionDeadline generous = new(TimeSpan.FromMinutes(5));
+
+        Assert.False(generous.Passed);
+
+        // A step shorter than what is left keeps its own timeout...
+        Assert.Equal(TimeSpan.FromSeconds(30), generous.Clamp(TimeSpan.FromSeconds(30)));
+
+        // ...and one longer than what is left is cut down to it, rather than being allowed to
+        // overshoot by its own full timeout.
+        CollectionDeadline tight = new(TimeSpan.FromMilliseconds(200));
+
+        Assert.True(tight.Clamp(TimeSpan.FromSeconds(30)) < TimeSpan.FromSeconds(1));
+
+        Thread.Sleep(400);
+
+        Assert.True(tight.Passed);
+
+        // Never negative — a passed deadline hands out zero, which is a step that does not run,
+        // not a timeout that means "wait for ever".
+        Assert.Equal(TimeSpan.Zero, tight.Remaining);
+        Assert.Equal(TimeSpan.Zero, tight.Clamp(TimeSpan.FromSeconds(30)));
+    }
+
+    /// <summary>
+    /// A budget that cannot admit any work at all is refused rather than honoured.
+    /// </summary>
+    /// <remarks>
+    /// Zero or negative skips every step and reports an entirely unobserved machine, with nothing
+    /// but per-query notes to say why — a complete, silent loss of the collection from a value that
+    /// can only ever be a mistake.
+    /// </remarks>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ACollectionDeadlineRefusesABudgetThatCanNeverRunAnything(int seconds)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new CollectionDeadline(TimeSpan.FromSeconds(seconds)));
     }
 
     /// <summary>

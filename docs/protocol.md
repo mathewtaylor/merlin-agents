@@ -222,8 +222,8 @@ is logged and audited server-side.
 
 `serverTime` is the one thing safely returned: a machine with a wrong clock cannot otherwise
 discover why it is refused, and it reveals nothing that the HTTP `Date` header does not. The agent
-retries once, having relearned its offset, when the correction `serverTime` implies differs by more
-than 30 seconds from the one it is ALREADY applying — which is the test that lets a machine both
+retries once, having relearned its offset, when the correction `serverTime` implies differs by at
+least 30 seconds from the one it is ALREADY applying — which is the test that lets a machine both
 acquire a correction and, once its clock is fixed, give one up. Comparing the implied correction
 against zero instead would leave a machine that has corrected its clock stamping the old offset for
 ever, refused every time, with nothing on the machine able to clear it.
@@ -236,13 +236,15 @@ ever, refused every time, with nothing on the machine able to clear it.
 
 | | Default |
 |---|---|
-| Timestamp skew tolerance | ±300 s |
+| Timestamp skew tolerance | ±300 s — **must stay above the agent's 30 s learn threshold** (below it, there is a band where the server refuses and the agent declines to relearn, which no run can climb out of) |
+| Largest clock correction an agent will adopt | ±10 years — beyond that a `serverTime` is a wrong answer, not a wrong clock |
 | Nonce cache window | the skew tolerance |
 | Maximum body | 256 KB |
 | Report cadence | every 6 h, jittered |
 | Update-check cadence | the updater daily, jittered by up to 2 h; the agent on every collection |
 | Minimum gap between scheduled updater checks | 1 h — `run --now` bypasses it |
 | Minimum gap between agent update checks | none, deliberately: a collection is never skipped to spare a download |
+| Maximum length of one collection | 100 s, shared across the version probe, the query pack and the host readings |
 | Maximum entries in a package archive | 512 |
 | Maximum size of an extracted package entry | 256 MB |
 | Maximum package archive | 256 MB |

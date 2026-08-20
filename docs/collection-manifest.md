@@ -122,3 +122,17 @@ Add a pack with the same entry shape, a normaliser alongside `WindowsNormaliser`
 `MacOsNormaliser` / `LinuxNormaliser`, a branch in `AgentPlatformInfo`, and a matrix entry in the
 build workflow. Nothing in the transport, signing or enrolment path changes: that separation is why
 collection is delegated to osquery in the first place.
+
+## What a slow machine gives up
+
+A collection holds the agent's machine-wide lock for its whole duration, and the updater abandons
+that lock after two minutes and reports contention — so a collection that runs long is a window in
+which nothing on the machine can put a broken agent back. The whole collection is therefore bounded
+at 100 seconds, shared across the osquery version probe, the query pack and the host readings that
+follow it. A healthy collection takes two or three seconds; nothing legitimate approaches the bound.
+
+**When it is reached, whatever has not run is reported as NOT OBSERVED** — the same null a missing
+table produces, never a negative reading. **The packs are therefore ordered security-posture first
+and inventory last**, so what a slow machine gives up is its hostname and chassis type rather than
+its disk encryption or its firewall. The order in `queries/<platform>.json` is the order they run
+in, and `merlin-agent status --manifest` prints them in that order.

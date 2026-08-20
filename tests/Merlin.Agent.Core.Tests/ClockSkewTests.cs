@@ -1,0 +1,154 @@
+using Merlin.Agent.Core.Crypto;
+using Xunit;
+
+namespace Merlin.Agent.Core.Tests;
+
+/// <summary>
+/// The rule that decides whether a refusal's <c>serverTime</c> becomes this machine's correction.
+/// </summary>
+/// <remarks>
+/// <b>Every failure this rule has had was permanent and silent, which is why it is tested this
+/// hard.</b> The correction is persisted and applied to every request the machine signs, so a wrong
+/// value is not a bad run — it is a machine that stops reporting and stops checking for updates
+/// together, with no route back on the machine itself. It has been wrong three ways already: a
+/// residual stored as an absolute, an absolute compared against zero instead of against the
+/// correction in force, and an unbounded value adopted from whatever answered the request.
+/// </remarks>
+public sealed class ClockSkewTests
+{
+    private static readonly DateTimeOffset _now = new(2026, 8, 20, 3, 0, 0, TimeSpan.Zero);
+
+    private static long At(long secondsFromNow) => _now.ToUnixTimeSeconds() + secondsFromNow;
+
+    /// <summary>A machine with no correction learns the whole of one.</summary>
+    [Fact]
+    public void AFreshMachineLearnsTheWholeCorrection()
+    {
+        Assert.True(ClockSkew.TryLearn(At(3600), _now, applied: 0, out long learned));
+        Assert.Equal(3600, learned);
+    }
+
+    /// <summary>
+    /// A correction that is already right is not relearned, so a refusal about something else
+    /// costs one request rather than two.
+    /// </summary>
+    /// <remarks>
+    /// The server's time agrees with the stamp we sent, so the clock is not why it was refused.
+    /// Retrying here is the doubled load the threshold exists to prevent.
+    /// </remarks>
+    [Fact]
+    public void ACorrectionThatIsAlreadyRightIsNotRelearned()
+    {
+        Assert.False(ClockSkew.TryLearn(At(3600), _now, applied: 3600, out long learned));
+        Assert.Equal(3600, learned);
+    }
+
+    /// <summary>
+    /// A machine whose clock has been FIXED gives up the correction it no longer needs.
+    /// </summary>
+    /// <remarks>
+    /// <b>The case a threshold measured against zero can never reach.</b> The correct offset is now
+    /// zero, which reads as "too small to act on" — so the machine keeps stamping an hour out, is
+    /// refused every time, and the value it must forget is the one it is being told to forget.
+    /// </remarks>
+    [Fact]
+    public void AStaleCorrectionIsGivenUpOnceTheClockIsRight()
+    {
+        Assert.True(ClockSkew.TryLearn(At(0), _now, applied: 3600, out long learned));
+        Assert.Equal(0, learned);
+    }
+
+    /// <summary>A clock wrong the other way is learned just the same.</summary>
+    [Fact]
+    public void ACorrectionCanBeNegative()
+    {
+        Assert.True(ClockSkew.TryLearn(At(-7200), _now, applied: 0, out long learned));
+        Assert.Equal(-7200, learned);
+    }
+
+    /// <summary>A difference below the threshold is not worth a second request.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(29)]
+    [InlineData(-29)]
+    public void ADifferenceBelowTheThresholdIsIgnored(int drift)
+    {
+        Assert.False(ClockSkew.TryLearn(At(3600 + drift), _now, applied: 3600, out long learned));
+        Assert.Equal(3600, learned);
+    }
+
+    /// <summary>At the threshold it is worth acting on.</summary>
+    [Fact]
+    public void ADifferenceAtTheThresholdIsLearned()
+    {
+        Assert.True(ClockSkew.TryLearn(At(3630), _now, applied: 3600, out long learned));
+        Assert.Equal(3630, learned);
+    }
+
+    /// <summary>
+    /// An absurd <c>serverTime</c> is refused rather than adopted — it is the difference between a
+    /// wasted request and a machine that never speaks again.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Both of these were reproduced against the unbounded version.</b> A value past
+    /// <c>253402300799</c> made <c>DateTimeOffset.FromUnixTimeSeconds</c> throw straight out of the
+    /// client, which filters only transport exceptions. A value just INSIDE the range was worse: it
+    /// was learned, persisted, and from the next run onward the caller's own
+    /// <c>now.AddSeconds(offset)</c> overflowed and threw BEFORE the request was built — so nothing
+    /// could ever relearn it, and the only repair was editing <c>state.json</c> as root.
+    /// </para>
+    /// <para>
+    /// The refusal body is whatever answered the request, and plaintext deployments are supported
+    /// (and warned about) — so this is one crafted reply away, not a theoretical shape.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(253402300799L)]
+    [InlineData(253402300800L)]
+    [InlineData(long.MaxValue)]
+    [InlineData(long.MinValue)]
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    public void AnImplausibleServerTimeIsRefusedWithoutThrowing(long serverTime)
+    {
+        Assert.False(ClockSkew.TryLearn(serverTime, _now, applied: 0, out long learned));
+        Assert.Equal(0, learned);
+    }
+
+    /// <summary>
+    /// A decade is still a clock; anything past it is not.
+    /// </summary>
+    /// <remarks>
+    /// A dead CMOS battery lands a machine in 2000 and a board with no RTC lands it at the epoch,
+    /// so the bound has to admit years — it is there to reject answers, not wrong clocks.
+    /// </remarks>
+    [Fact]
+    public void ADecadeOutIsStillLearned()
+    {
+        long nineYears = 9L * 365 * 24 * 3600;
+
+        Assert.True(ClockSkew.TryLearn(At(nineYears), _now, applied: 0, out long learned));
+        Assert.Equal(nineYears, learned);
+
+        Assert.False(ClockSkew.TryLearn(At(11L * 365 * 24 * 3600), _now, applied: 0, out _));
+    }
+
+    /// <summary>
+    /// The threshold must stay below the server's skew tolerance, or there is a band in which the
+    /// server refuses and the agent declines to learn.
+    /// </summary>
+    /// <remarks>
+    /// <b>A permanent wedge, and nothing else in the codebase states the coupling.</b> Every skew
+    /// refusal implies an error larger than the tolerance; the agent only relearns when the implied
+    /// change clears the threshold. Order them the wrong way round and the two guards leave a gap
+    /// that nothing on the machine can climb out of. Documented in <c>docs/protocol.md</c> § Bounds.
+    /// </remarks>
+    [Fact]
+    public void TheLearnThresholdSitsWellBelowTheServersSkewTolerance()
+    {
+        const long serverSkewToleranceSeconds = 300;
+
+        Assert.True(ClockSkew.LearnThresholdSeconds < serverSkewToleranceSeconds);
+    }
+}

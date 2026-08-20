@@ -121,6 +121,24 @@ public sealed class BinaryProbe
                 detail).Trim());
         }
 
-        return new ProbeResult(true, outcome.StandardOutput);
+        // EXECUTING IS NOT THE WHOLE QUESTION — THE ANSWER HAS TO BE READABLE. This probe is the
+        // execute-before-commit gate, and what it is really asked is "does this binary work, and
+        // what is it?". A read that never reached end-of-file leaves the output empty while the
+        // process exited zero, so the caller would commit the swap and then record the ADVERTISED
+        // version as the one the binary itself stated — a silent substitution in the one field the
+        // never-install-this-again rule compares against. Asked of the installed binary instead, an
+        // empty answer means the outgoing copy is not promoted to the fallback, which is the
+        // conservative direction and already what a null means there.
+        //
+        // ProcessOutcome carries the answer, so ask it rather than re-deriving the rule from
+        // Started/Exited/ExitCode — which is how this file and the osquery runner both ended up
+        // safe only by accident, each relying on an empty string failing a check further
+        // downstream.
+        return outcome.OutputComplete
+            ? new ProbeResult(true, outcome.StandardOutput)
+            : new ProbeResult(
+                false,
+                "It ran, but its output could not be read to the end, so what it is could not be "
+                + "established.");
     }
 }

@@ -37,6 +37,7 @@ public sealed record TransportResult(bool Succeeded, string Detail, DateTimeOffs
 /// lets the client learn gets a <b>residual</b> — how wrong the already-corrected time still is —
 /// which is right for the retry in flight and wrong the moment it is persisted, because every
 /// reader treats the stored field as absolute.
+/// </para>
 /// <para>
 /// It does not fail loudly. With <c>A</c> the true offset and <c>s</c> the stored one, persisting
 /// the residual gives <c>s' = A - s</c>: a two-cycle that never converges, so a drifting machine
@@ -44,7 +45,6 @@ public sealed record TransportResult(bool Succeeded, string Detail, DateTimeOffs
 /// run. It hid because the FIRST correction is taken against a raw instant and is therefore
 /// genuinely absolute, so a freshly enrolled machine looks perfect. <c>UpdateClient</c> has always
 /// worked this way; this client is the one that did not.
-/// </para>
 /// </para>
 /// </remarks>
 public sealed class ReportClient : IDisposable
@@ -322,36 +322,17 @@ public sealed class ReportClient : IDisposable
             return false;
         }
 
-        // ABSOLUTE, BECAUSE `now` IS RAW. See the class remarks: the caller hands over this
-        // machine's uncorrected clock and Build applies the offset, so the difference measured here
-        // is the whole correction rather than what is left of it.
-        DateTimeOffset serverTime = DateTimeOffset.FromUnixTimeSeconds(refusal.ServerTime);
-        long offset = (long)(serverTime - now).TotalSeconds;
-
-        // MEASURED AGAINST THE CORRECTION ALREADY IN FORCE, never against zero. This asks one
-        // question — would applying what the server just told us actually move the stamp? — and
-        // asking it the other way is wrong in BOTH directions:
-        //
-        //  - a machine carrying a stale correction can never shed it. Once an hour of offset is
-        //    stored, every request is stamped an hour from this machine's own clock, so the day the
-        //    clock is FIXED that correction becomes the entire error. The server refuses, replies
-        //    with a time that matches our raw clock exactly, and the absolute offset it implies is
-        //    ZERO — which a "< 30" test reads as "not worth acting on". So it is refused again,
-        //    for ever, and the value it needs to forget is the one it is being told to forget.
-        //    That is a machine that silently stops reporting and stops updating, with no route back
-        //    on the machine itself;
-        //  - and a machine whose correction is RIGHT retries every refusal that was never about the
-        //    clock, because its large, correct offset always clears the threshold — which is
-        //    exactly the doubled load this guard was added to prevent.
-        //
-        // The difference answers both: near-zero means the stamp we already sent was what the
-        // server would have wanted, so the clock is not why it was refused.
-        if (Math.Abs(offset - ClockOffsetSeconds) < 30)
+        // ONE RULE, SHARED. It was this twenty lines and this comment in two files, and the two
+        // halves had already drifted once — one learning an absolute correction and the other a
+        // residual, which produced a machine alternating between two wrong offsets for ever. Only
+        // one of the two files sits in a project the test project can reference, so a duplicated
+        // rule was also a rule that was half tested by construction.
+        if (!ClockSkew.TryLearn(refusal.ServerTime, now, ClockOffsetSeconds, out long learned))
         {
             return false;
         }
 
-        ClockOffsetSeconds = offset;
+        ClockOffsetSeconds = learned;
         return true;
     }
 
