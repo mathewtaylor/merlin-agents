@@ -1,6 +1,4 @@
-using System.Security.Cryptography;
 using Merlin.Agent.Core;
-using Merlin.Agent.Core.Crypto;
 using Merlin.Agent.Core.Platform;
 using Merlin.Agent.Core.State;
 using Merlin.Agent.Core.Update;
@@ -29,6 +27,14 @@ namespace Merlin.Updater;
 /// key, same state directory, same SYSTEM or root privilege. A second enrolment would mean a second
 /// credential at rest on every machine for no gain.
 /// </para>
+/// <para>
+/// <b>The turn itself lives in <see cref="UpdateTurn"/>, which the agent runs too.</b> This file
+/// parses arguments, names the component, and turns the turn's answer into words and an exit code.
+/// The ordering that envelope holds — read the state only once the lock is taken, refuse to stamp a
+/// run for an image that was replaced while it waited, stamp before anything fallible — was written
+/// twice, in two Program.cs files no test could reach, and four consecutive audit rounds each found
+/// a different defect in it.
+/// </para>
 /// </remarks>
 public static class Program
 {
@@ -45,22 +51,6 @@ public static class Program
     /// catching up.
     /// </remarks>
     private static readonly TimeSpan _minimumInterval = TimeSpan.FromHours(1);
-
-    /// <summary>
-    /// How far after this process started a swap can plausibly have landed during its lock wait.
-    /// </summary>
-    /// <remarks>
-    /// <b>The was-I-replaced guard needs an upper bound or a backwards clock makes it permanent.</b>
-    /// It compares a stored instant against this run's start, which is sound while the clock moves
-    /// forward — the swap can only have happened during the lock wait, which is at most two
-    /// minutes. But a clock corrected BACKWARDS makes every previously stored instant look like the
-    /// future, so the guard would fire on every scheduled run and the machine would stop collecting
-    /// entirely until real time caught up. Beyond this bound the timestamp is not evidence of a
-    /// concurrent swap, it is evidence of a wrong clock — and carrying on is the safer reading,
-    /// because the worst case is one honest run against a binary that was replaced a while ago,
-    /// against a machine that never reports again.
-    /// </remarks>
-    private static readonly TimeSpan _concurrentSwapWindow = TimeSpan.FromMinutes(5);
 
     /// <summary>Entry point.</summary>
     /// <param name="args">Command-line arguments.</param>
@@ -89,14 +79,13 @@ public static class Program
                 };
         }
 
-        // UNFILTERED, DELIBERATELY — the same rule as the agent's update turn, and it matters more
+        // UNFILTERED, DELIBERATELY — the same rule as the update turn itself, and it matters more
         // here. A named list of the expected types reads as the more careful choice and is the
         // weaker one: UriFormatException, NotSupportedException, ObjectDisposedException and a
-        // plain OperationCanceledException all walk straight past one. RunAsync has no inner try,
-        // so anything that escapes skips its closing AgentState.Write — and that write is what
-        // stamps LastUpdaterRunAt, which is the WITNESS a revert requires. A repeatable crash would
-        // therefore mean a broken agent could never be put back, which is the failure this whole
-        // process exists to prevent.
+        // plain OperationCanceledException all walk straight past one. UpdateTurn catches whatever
+        // escapes the update work and reports it as a fault; this catch is what stops anything
+        // AROUND that — reading the state, taking the lock, opening the device key — ending a
+        // scheduled run in a stack trace nobody reads.
 #pragma warning disable CA1031
         catch (Exception exception)
 #pragma warning restore CA1031
@@ -119,156 +108,92 @@ public static class Program
     {
         bool operatorRequested = args.Contains("--now", StringComparer.OrdinalIgnoreCase);
 
-        AgentStateData? state = AgentState.Read();
+        Action<string> log = operatorRequested
+            ? Console.WriteLine
+            : _ => { };
 
-        if (state is null)
-        {
-            // Not enrolled: there is no device to ask on behalf of and no server to ask. The
-            // installer runs the agent's enrolment before it registers this schedule, so in
-            // practice this is a machine mid-install or one that has been uninstalled.
-            if (operatorRequested)
+        UpdateTurn turn = new(
+            AgentComponent.Updater,
+            InstallLayout.Current,
+            () => new DeviceUpdateSession(),
+            swapLog: log,
+            decisionLog: log,
+            minimumInterval: _minimumInterval);
+
+        UpdateTurnResult result = await turn.RunAsync(
+            operatorRequested,
+            announce: state =>
             {
-                Console.Error.WriteLine(
-                    "This machine has not enrolled, so there is nothing to check for.");
-            }
+                if (operatorRequested)
+                {
+                    Console.WriteLine(
+                        $"Checking {state.ServerUrl} for a different agent version...");
+                }
+            }).ConfigureAwait(false);
 
-            return 0;
-        }
-
-        // Captured BEFORE the lock wait, so a swap that lands DURING that wait can be told apart
-        // from one that predates this process. See the guard after the re-read.
-        DateTimeOffset startedAt = DateTimeOffset.UtcNow;
-
-        // A SWAPPER NEVER SWAPS A TARGET THAT IS CURRENTLY RUNNING. The agent holds this same lock
-        // for the whole of a collection, so failing to take it means the agent is mid-run — which
-        // is not an error, and the scheduler fires again tomorrow.
-        using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
-
-        if (machineLock is null)
+        switch (result.Status)
         {
-            if (accessDenied)
-            {
+            case UpdateTurnStatus.NotEnrolled:
+
+                // Not enrolled: there is no device to ask on behalf of and no server to ask. The
+                // installer runs the agent's enrolment before it registers this schedule, so in
+                // practice this is a machine mid-install or one that has been uninstalled.
+                if (operatorRequested)
+                {
+                    Console.Error.WriteLine(
+                        "This machine has not enrolled, so there is nothing to check for.");
+                }
+
+                return 0;
+
+            case UpdateTurnStatus.RightsRefused:
+
                 // A rights failure is not contention, and must not be reported as one.
                 Console.Error.WriteLine(
                     "merlin-updater could not take the machine lock. It must run as root (or "
                     + "SYSTEM on Windows); nothing was checked.");
                 return 1;
-            }
 
-            if (operatorRequested)
-            {
-                Console.Error.WriteLine(
-                    "The agent is running. Nothing was changed; the updater will try again on its "
-                    + "next scheduled run.");
-            }
+            case UpdateTurnStatus.Contended:
+                if (operatorRequested)
+                {
+                    Console.Error.WriteLine(
+                        "The agent is running. Nothing was changed; the updater will try again on "
+                        + "its next scheduled run.");
+                }
 
-            return 0;
-        }
+                return 0;
 
-        // RE-READ UNDER THE LOCK. The snapshot above was taken BEFORE the lock, and the wait is up
-        // to two minutes — so every time that wait does its job, the holder we waited for has
-        // written state we are still holding a pre-image of. Persisting it would silently erase
-        // whatever it just recorded: the swap mark, the version stamped with it, the outcome owed
-        // to Merlin, the pending note. The lock protects the FILES; only this protects the
-        // read-modify-write cycle, and state.json is the sole authority for every safety rule in
-        // this design. Both schedulers fire missed runs on wake, so a laptop opening its lid
-        // produces exactly this overlap routinely.
-        state = AgentState.Read() ?? state;
+            case UpdateTurnStatus.Replaced:
 
-        // THIS PROCESS IS NOT EVIDENCE ABOUT A BINARY THAT REPLACED IT. If the agent swapped this
-        // updater while we sat waiting for the lock, the image executing here is the one that was
-        // replaced — so stamping a run would tell the next agent run that the NEW updater has
-        // proved itself, when it has never executed at all. The mark would then be cleared, the
-        // revert could never fire, and the no-stacked-swap rule would stop engaging. Exit and let
-        // the scheduler start the binary that is actually on disk; it is the only honest witness.
-        if (state.SwappedAtOf(AgentComponent.Updater) is { } replacedAt
-            && replacedAt > startedAt
-            && replacedAt - startedAt <= _concurrentSwapWindow)
-        {
-            if (operatorRequested)
-            {
-                Console.Error.WriteLine(
-                    "This updater was replaced while it waited for the lock. Nothing was done; the "
-                    + "new binary runs on the next scheduled check.");
-            }
+                // The image executing here is the one that was replaced while it waited for the
+                // lock, so it stamped nothing: a run stamped by it would tell the next agent run
+                // that the NEW updater has proved itself, when it has never executed at all.
+                if (operatorRequested)
+                {
+                    Console.Error.WriteLine(
+                        "This updater was replaced while it waited for the lock. Nothing was done; "
+                        + "the new binary runs on the next scheduled check.");
+                }
 
-            return 0;
-        }
+                return 0;
 
-        // The instant used for everything that follows is taken AFTER the wait. The lock wait can
-        // be two minutes, and this value is the SIGNED request timestamp — spending a large slice
-        // of the skew tolerance before the machine's own drift is even counted invites a refusal
-        // and a wasted retry.
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+            case UpdateTurnStatus.TooSoon:
+                return 0;
 
-        // THE INTERVAL IS JUDGED AFTER THE RE-READ, not before the lock. A run that spent two
-        // minutes waiting for the agent would otherwise be measured against a stale stamp, and a
-        // burst of catch-up runs is precisely when both of those happen at once.
-        if (!operatorRequested
-            && state.LastUpdaterRunAt is { } lastRun
-            && now - lastRun < _minimumInterval)
-        {
-            return 0;
-        }
+            default:
+                if (result.Fault is { } fault)
+                {
+                    Console.Error.WriteLine($"merlin-updater: {fault}");
+                    return 1;
+                }
 
-        // STAMPED BEFORE ANY NETWORK WORK, exactly as the agent stamps itself at the top of a
-        // collection, and for the mirror-image reason: this is the witness the recovery rule reads
-        // to decide whether the machine was actually up. Written only at the end of the turn it sat
-        // behind a download bounded at ten minutes, so a reboot, a kill or a crash mid-run lost it
-        // — and a witness that keeps going missing is a broken agent that never gets put back.
-        DateTimeOffset? previousUpdaterRun = state.LastUpdaterRunAt;
+                if (operatorRequested)
+                {
+                    Console.WriteLine("Done.");
+                }
 
-        AgentState.Write(state
-            .WithLastRun(AgentComponent.Updater, now)
-            .WithVersion(AgentComponent.Updater, AgentVersionInfo.Current));
-
-        Action<string> log = operatorRequested
-            ? Console.WriteLine
-            : _ => { };
-
-        if (operatorRequested)
-        {
-            Console.WriteLine($"Checking {state.ServerUrl} for a different agent version...");
-        }
-
-        (ECDsa key, _) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
-
-        using (key)
-        {
-            using HttpClient http = new() { Timeout = TimeSpan.FromMinutes(10) };
-            using UpdateClient client = new(
-                state.ServerUrl, key, AgentVersionInfo.Current, state.ClockOffsetSeconds);
-
-            ComponentSwapper swapper = new(AgentComponent.Updater, InstallLayout.Current, http, BinaryProbe.Default, log);
-
-            UpdateRunner runner = new(
-                AgentComponent.Updater,
-                InstallLayout.Current,
-                swapper,
-                BinaryProbe.Default,
-                UpdateWindows.Default,
-                log,
-                () => DateTimeOffset.UtcNow,
-                AgentState.Write);
-
-            AgentStateData updated = await runner.RunAsync(
-                state,
-                // This updater's PREVIOUS run, captured above before the stamp. It is what says the
-                // machine was actually up for the window a revert is judged against; a laptop that
-                // was merely shut has a working agent, not a broken one.
-                previousUpdaterRun,
-                token => client.CheckAsync(state.DeviceId, AgentRuntimeIdentifier.Current, now, token),
-                now).ConfigureAwait(false);
-
-            AgentState.Write(updated);
-
-            if (operatorRequested)
-            {
-                Console.WriteLine("Done.");
-            }
-
-            return 0;
+                return 0;
         }
     }
 
