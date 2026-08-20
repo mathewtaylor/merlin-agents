@@ -3,7 +3,12 @@ using System.Diagnostics;
 namespace Merlin.Agent.Core.Platform;
 
 /// <summary>What happened when a child process was run.</summary>
-/// <param name="Started">Whether the process could be started at all.</param>
+/// <param name="Started">
+/// Whether the process could be started at all. <b>Also <c>false</c> when it was never attempted
+/// because there was no time left</b> — a caller clamping to a spent deadline gets the same
+/// not-observed answer as one whose binary is missing, which is what lets every clamping caller
+/// stay unchanged.
+/// </param>
 /// <param name="Exited">Whether it exited within its timeout.</param>
 /// <param name="ExitCode">Its exit code, when it exited.</param>
 /// <param name="StandardOutput">Everything it wrote to standard output.</param>
@@ -83,7 +88,11 @@ public static class ProcessRunner
     /// </remarks>
     /// <param name="fileName">The executable.</param>
     /// <param name="arguments">Its arguments.</param>
-    /// <param name="timeout">How long it may take.</param>
+    /// <param name="timeout">
+    /// How long it may take. <b>Zero or less means do not start it</b>, reported as
+    /// <see cref="ProcessOutcome.Started"/> <c>false</c> — callers clamp this to a shared
+    /// collection deadline, and a spent one must cost nothing rather than a spawn and a kill.
+    /// </param>
     /// <returns>What happened.</returns>
     public static ProcessOutcome Run(string fileName, IEnumerable<string> arguments, TimeSpan timeout)
     {

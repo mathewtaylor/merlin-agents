@@ -193,8 +193,10 @@ reason.
 
 The agent runs with administrative rights — SYSTEM on Windows, root on macOS and Linux — which is
 what reading disk-encryption state and the local security policy requires. It makes outbound
-requests to exactly one host — the Merlin deployment it enrolled with, recorded in its state file —
-and listens on nothing. That address is normally `https`; `enrol` and `set-server` also accept
+requests to exactly one host for everything it SENDS — the Merlin deployment it enrolled with,
+recorded in its state file — and listens on nothing. It also FETCHES from the release hosts named
+in § 5 when, and only when, it is replacing a component; that request carries no report and nothing
+about the machine. That address is normally `https`; `enrol` and `set-server` also accept
 `http` for a deployment behind a private ingress or on a developer's machine, and warn when they
 do, because the update answer described below is not signed and TLS is the only thing protecting
 it in transit.

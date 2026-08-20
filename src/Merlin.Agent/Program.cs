@@ -133,7 +133,7 @@ public static class Program
         // Enrolment replaces the state record wholesale, so it must not land while the updater is
         // mid-swap and about to write a mark of its own.
         using MachineLock? enrolLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied);
 
         if (enrolLock is null)
         {
@@ -669,7 +669,7 @@ public static class Program
         // this while the updater happens to be mid-swap persists a pre-image and erases the swap
         // mark, which is a broken binary that can never be put back.
         using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied);
 
         if (machineLock is null)
         {
@@ -775,7 +775,7 @@ public static class Program
         // this while the updater happens to be mid-swap persists a pre-image and erases the swap
         // mark, which is a broken binary that can never be put back.
         using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied);
 
         if (machineLock is null)
         {
@@ -848,7 +848,7 @@ public static class Program
         // collect then creates a fresh key and every report from that machine is refused for ever,
         // which is a considerably worse end state than a failed uninstall.
         using (MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied))
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied))
         {
             if (machineLock is null)
             {

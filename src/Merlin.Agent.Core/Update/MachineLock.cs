@@ -116,9 +116,6 @@ public sealed class MachineLock : IDisposable
                     FileAccess.ReadWrite,
                     FileShare.None));
 
-                // Taken in the end, so whatever an earlier attempt saw was contention after all.
-                accessDenied = false;
-
                 return held;
             }
             catch (IOException)

@@ -73,6 +73,10 @@
       "sql": "SELECT name, version, build, platform, platform_like FROM os_version;",
       "purpose": "Distribution, version and id \u2014 what end-of-support is judged against."
     },
+    "kernel": {
+      "sql": "SELECT version FROM kernel_info;",
+      "purpose": "Running kernel release, reported as the build so a machine pending a reboot after a kernel update is visible."
+    },
     "system_volume": {
       "sql": "SELECT blocks, blocks_available, blocks_size FROM mounts WHERE path = '/';",
       "purpose": "Free space on the root filesystem (A.8.6 capacity)."
@@ -80,10 +84,6 @@
     "system_info": {
       "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model, cpu_brand FROM system_info;",
       "purpose": "Machine identity, and the serial used to reconcile against the asset register."
-    },
-    "kernel": {
-      "sql": "SELECT version FROM kernel_info;",
-      "purpose": "Running kernel release, reported as the build so a machine pending a reboot after a kernel update is visible."
     }
   }
 }

@@ -275,11 +275,7 @@ public static class AgentState
 
     /// <summary>Writes the state.</summary>
     /// <param name="state">The state to persist.</param>
-    public static void Write(AgentStateData state)
-    {
-        EnsureDirectory();
-        WriteTo(Directory, state);
-    }
+    public static void Write(AgentStateData state) => WriteTo(Directory, state);
 
     /// <summary>Writes the state into a named directory.</summary>
     /// <param name="directory">The state directory.</param>

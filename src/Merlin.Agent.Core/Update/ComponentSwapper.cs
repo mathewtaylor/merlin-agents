@@ -148,9 +148,6 @@ public sealed class ComponentSwapper
         string sha256,
         CancellationToken cancellationToken = default)
     {
-        // NEVER BOTH IN ONE RUN. If the agent and the updater are both behind, one moves now and
-        // the other on a later run — after this one has proved itself by running. Enforced here so
-        // no caller can decide otherwise.
         // THE RULE, ENFORCED RATHER THAN ASSUMED. A process that overwrote its own image with one
         // that cannot execute would leave nothing running here able to put the old one back, which
         // is the single unrecoverable failure the two-binary design exists to remove.
@@ -159,6 +156,9 @@ public sealed class ComponentSwapper
             return SwapResult.Failed(SelfSwapRefusal(component));
         }
 
+        // NEVER BOTH IN ONE RUN. If the agent and the updater are both behind, one moves now and
+        // the other on a later run — after this one has proved itself by running. Enforced here so
+        // no caller can decide otherwise.
         if (_swapped)
         {
             return SwapResult.NothingToDo(

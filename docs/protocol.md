@@ -155,9 +155,17 @@ device page. Usually it means nothing was replaced at all — a download failure
 refused host, a staged binary that would not execute — and the machine is still on what it had.
 But it is also what a failed RECOVERY reports: a component that was replaced, has not run since,
 and either could not be restored or had no retained binary to restore. That second case is the
-worst state this design admits, and `lastUpdateDetail` is what tells them apart — it names the
-missing fallback explicitly. Treat a `Failed` whose detail mentions a binary that "has not run
-since it was replaced" as a device needing attention, not as a no-op.
+worst state this design admits.
+
+**The two are NOT distinguishable from this payload, and a server must not be built as though they
+are.** The agent records a sentence naming the missing fallback, but it keeps it locally — it is
+what `merlin-agent status` prints, and it does not cross the wire; the report carries the outcome
+and nothing else. So `Failed` means "the last attempt did not succeed", and telling a machine that
+merely failed to download from one that was left with no working binary needs the device itself.
+The signal that separates them without asking the machine is CORROBORATING evidence this payload
+already carries: a `Failed` whose `agentVersion` has not moved and whose reports then stop is the
+second case. Widening the payload is possible, but it is a wire change and is deliberately not
+made here.
 
 **202** on acceptance.
 
@@ -237,7 +245,7 @@ ever, refused every time, with nothing on the machine able to clear it.
 | | Default |
 |---|---|
 | Timestamp skew tolerance | ±300 s — **must stay above the agent's 30 s learn threshold** (below it, there is a band where the server refuses and the agent declines to relearn, which no run can climb out of) |
-| Largest clock correction an agent will adopt | ±10 years — beyond that a `serverTime` is a wrong answer, not a wrong clock |
+| Largest clock correction an agent will adopt | ±100 years — the bound exists to keep the correction REPRESENTABLE, not to judge how wrong a clock may be. A machine whose clock never had the right time (a dead CMOS battery, a board with no RTC) is decades out and must still be correctable; a `serverTime` near the end of the representable range implies millennia and would make every later request throw before it was built |
 | Nonce cache window | the skew tolerance |
 | Maximum body | 256 KB |
 | Report cadence | every 6 h, jittered |

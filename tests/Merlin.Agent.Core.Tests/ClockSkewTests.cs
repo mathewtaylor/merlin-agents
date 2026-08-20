@@ -178,6 +178,12 @@ public sealed class ClockSkewTests
     [InlineData(0L, long.MinValue)]
     [InlineData(1786000000L, long.MinValue)]
     [InlineData(1786000000L, long.MaxValue)]
+
+    // These two reach PAST the early returns and land on the subtraction, which is the only place
+    // the applied argument can overflow: without TryLearn sanitising it first, `offset - applied`
+    // evaluates to long.MinValue and Math.Abs throws. Every other pair returns before it.
+    [InlineData(1787194800L, long.MinValue)]
+    [InlineData(1787194799L, long.MaxValue)]
     public void NoInputMakesTheRuleThrow(long serverTime, long applied)
     {
         // The answer is not what is under test — that it RETURNS one is.
@@ -213,7 +219,8 @@ public sealed class ClockSkewTests
     [InlineData(0L)]
     [InlineData(3600L)]
     [InlineData(-3600L)]
-    [InlineData(315360000L)]
+    [InlineData(3153600000L)]     // exactly the bound — kept, not discarded
+    [InlineData(-3153600000L)]    // and the same at the other end
     public void APlausibleStoredCorrectionIsKept(long stored)
     {
         Assert.Equal(stored, ClockSkew.Sanitise(stored));

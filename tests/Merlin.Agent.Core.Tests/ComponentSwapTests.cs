@@ -192,6 +192,49 @@ public sealed class ComponentSwapTests
         Assert.Null(result.InstalledVersion);
     }
 
+    /// <summary>
+    /// Neither verb will touch the caller's own running image — swap or restore.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the property the whole two-binary design exists to buy, and it was asserted only
+    /// as a side effect of another test's second call.</b> A process that overwrote its own image
+    /// with one that cannot execute would leave nothing running on the machine able to put the old
+    /// one back — the single unrecoverable failure here, and the reason there are two binaries
+    /// rather than one that updates itself. <c>Restore</c> is included because it is the same
+    /// prohibition for the same reason and had no test of its own: it also replaces the file the
+    /// caller is executing from.
+    /// </remarks>
+    [Theory]
+    [InlineData(AgentComponent.Agent)]
+    [InlineData(AgentComponent.Updater)]
+    public async Task NeitherVerbWillReplaceTheCallersOwnImage(AgentComponent self)
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(self, "the running binary");
+        File.WriteAllText(kit.Layout.PreviousPathOf(self), "an older one, retained");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            self, kit.Layout, http, UpdateTestKit.ProbeReporting("9.9.9"), _ => { });
+
+        SwapResult swapped = await swapper.SwapAsync(
+            self, "9.9.9", UpdateTestKit.AllowedEndpoint, UpdateTestKit.Digest(archive));
+
+        SwapResult restored = swapper.Restore(self);
+
+        Assert.Equal(AgentUpdateOutcome.Failed, swapped.Outcome);
+        Assert.Equal(AgentUpdateOutcome.Failed, restored.Outcome);
+        Assert.Contains("own running image", swapped.Detail, StringComparison.Ordinal);
+        Assert.Contains("own running image", restored.Detail, StringComparison.Ordinal);
+
+        // And the refusal is real, not merely reported: the file is untouched by both.
+        Assert.Equal("the running binary", File.ReadAllText(kit.Layout.PathOf(self)));
+        Assert.Equal("an older one, retained", File.ReadAllText(kit.Layout.PreviousPathOf(self)));
+    }
+
     [Fact]
     public async Task AnArchiveWithoutTheNamedComponentInstallsNothing()
     {

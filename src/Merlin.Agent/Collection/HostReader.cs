@@ -147,13 +147,18 @@ public static class HostReader
     {
         (int? minimumLength, bool? complexity) = LinuxPasswordPolicy();
 
+        // ONE READING, ASKED ONCE. It was asked twice — once for the flag and once for the string —
+        // which is two independent observations deciding two halves of one fact, free to disagree
+        // and report a TPM that is present with no version.
+        (bool? present, string? version) = LinuxTpm();
+
         return new SupplementalReadings(
             PasswordMinimumLength: minimumLength,
             PasswordComplexityEnabled: complexity,
             FirewallEnabled: LinuxFirewall(deadline),
             SecureBootEnabled: LinuxSecureBoot(),
-            TpmPresent: LinuxTpmVersion() is not null,
-            TpmVersion: LinuxTpmVersion(),
+            TpmPresent: present,
+            TpmVersion: version,
             LastUpdateInstalledAt: LinuxLastPackageChange());
     }
 
@@ -262,11 +267,51 @@ public static class HostReader
         }
     }
 
-    private static string? LinuxTpmVersion()
+    /// <summary>
+    /// Reads whether this machine has a TPM, and which version.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>"No TPM" and "we could not look" are different answers, and only one of them was being
+    /// reported.</b> The flag was derived as <c>ReadFile(...) is not null</c>, and
+    /// <see cref="CommandRunner.ReadFile"/> returns null both for a file that is not there and for
+    /// one it was refused — so a sysfs node the agent could not open came back as a definite
+    /// <c>false</c>: a machine reported as having no security processor when nobody had
+    /// established that. <c>TpmPresent</c> is <c>bool?</c> on both the reading and the wire
+    /// precisely so the third answer can be given, and <see cref="CommandRunner"/>'s own remarks
+    /// state the rule — a reading that could not be taken is null, never a protection reported as
+    /// absent.
+    /// </para>
+    /// <para>
+    /// The directory is what separates them: <c>/sys/class/tpm/tpm0</c> exists if and only if the
+    /// kernel bound a TPM driver, and it needs no read permission on the file inside to test.
+    /// </para>
+    /// </remarks>
+    /// <returns>Whether a TPM is present, and its major version when that could be read.</returns>
+    private static (bool? Present, string? Version) LinuxTpm()
     {
-        string? major = CommandRunner.ReadFile("/sys/class/tpm/tpm0/tpm_version_major")?.Trim();
+        const string device = "/sys/class/tpm/tpm0";
 
-        return string.IsNullOrWhiteSpace(major) ? null : major;
+        string? major = CommandRunner.ReadFile($"{device}/tpm_version_major")?.Trim();
+
+        if (!string.IsNullOrWhiteSpace(major))
+        {
+            return (true, major);
+        }
+
+        try
+        {
+            // No device node at all is an OBSERVED absence — this is the ordinary answer on a
+            // virtual machine or an older board, and reporting it as unknown would lose a true
+            // reading. A node that exists whose version we could not read is a TPM we can see and
+            // cannot describe: present, version unknown.
+            return Directory.Exists(device) ? (true, null) : (false, null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // We could not even determine that much. Not observed.
+            return (null, null);
+        }
     }
 
     /// <summary>

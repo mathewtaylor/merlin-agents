@@ -125,7 +125,7 @@ stronger assurance than reading anybody's collector code.
 
 **`osqueryi`, one-shot — never the `osqueryd` daemon.** The daemon's distinctive value is scheduled
 query packs and evented tables, and nothing downstream reads either: Merlin records one check result
-per day. So the agent shells out for about a second, six times a day, and exits.
+per day. So the agent shells out for about a second, four times a day, and exits.
 
 **A scheduled run, not a service.** Zero resident footprint, no listening socket, and the binary is
 never file-locked so an update is a swap. A crashed run fires again next interval instead of staying
