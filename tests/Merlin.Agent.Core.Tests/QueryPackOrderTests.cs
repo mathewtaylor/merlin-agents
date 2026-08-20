@@ -50,6 +50,11 @@ public sealed class QueryPackOrderTests
     /// passes silently — it is only caught when it lands at or after the first classified inventory
     /// key. A count is the cheapest thing that cannot be satisfied by omission.
     /// </remarks>
+    /// <remarks>
+    /// <b>It forces an ACKNOWLEDGEMENT, not a classification</b> — bumping the number and walking
+    /// away satisfies it. That is still worth having, because the number cannot be bumped without
+    /// reading the rule directly above it, but do not mistake it for the stronger guarantee.
+    /// </remarks>
     private static readonly Dictionary<string, int> _expectedCount = new(StringComparer.Ordinal)
     {
         ["linux.json"] = 7,
@@ -73,7 +78,11 @@ public sealed class QueryPackOrderTests
             Assert.Contains(name, keys);
         }
 
-        Assert.Equal(_expectedCount[pack], keys.Count);
+        Assert.True(
+            _expectedCount[pack] == keys.Count,
+            $"{pack} holds {keys.Count} queries, not {_expectedCount[pack]}. Classify the new one "
+            + "in _inventory if it is inventory, leave it out if it is posture, and update the "
+            + "count either way. Order: " + string.Join(", ", keys));
 
         // DefaultIfEmpty rather than a bare Max/Min: an all-inventory or all-posture pack would
         // otherwise throw "sequence contains no elements" instead of the message written below.
@@ -122,11 +131,24 @@ public sealed class QueryPackOrderTests
     }
 
     /// <remarks>
-    /// <b><c>JsonDocument</c> enumerates properties in DOCUMENT order</b>, which is what makes this
-    /// file possible at all — it is a read-only view over the original payload rather than a
-    /// re-materialised map. That is a property of the implementation rather than a documented
-    /// guarantee of <c>EnumerateObject</c>, so the theory below pins a known order as its own
-    /// check: were it ever to sort or rehash, every assertion here would silently become vacuous.
+    /// <para>
+    /// <b><c>JsonDocument</c> enumerates properties in DOCUMENT order</b>, which is what lets this
+    /// file read an order out of a JSON object at all — it is a read-only view over the original
+    /// payload. That is a property of the implementation rather than a documented guarantee of
+    /// <c>EnumerateObject</c>, so <c>TheJsonReaderPreservesDocumentOrder</c> pins it: were it ever
+    /// to sort or rehash, every assertion here would silently become vacuous.
+    /// </para>
+    /// <para>
+    /// <b>THIS IS NOT THE READER THE AGENT USES, and the difference is not academic.</b>
+    /// <c>QueryPack.Load</c> deserialises into a <c>Dictionary&lt;string, QueryPackEntry&gt;</c> and
+    /// builds the run order by enumerating it — the exact construct whose own remarks in that file
+    /// call its ordering guarantee insufficient. It lives in <c>Merlin.Agent</c>, which this test
+    /// project does not reference, so what is asserted here is the order of the FILE and not the
+    /// order the agent runs. Closing that needs <c>QueryPack</c> moved into
+    /// <c>Merlin.Agent.Core</c> so the shipping loader can be asserted directly; until then this
+    /// catches an editing mistake in the pack but not a change of loader. <c>Load</c> also SKIPS an
+    /// entry whose <c>sql</c> is blank, which the count below cannot see.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheJsonReaderPreservesDocumentOrder()

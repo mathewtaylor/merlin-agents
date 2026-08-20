@@ -150,8 +150,32 @@ public sealed class WindowsNormaliserTests
         AgentVolumeReading volume = Assert.Single(Build(results).Encryption!);
 
         Assert.True(volume.Protected);
-        Assert.NotEqual(DiskEncryptionMethod.None, volume.Method);
-        Assert.NotEqual(DiskEncryptionMethod.NotObserved, volume.Method);
+
+        // PINNED, not merely "not one of the two wrong ones". Asserting NotEqual against a couple of
+        // members left five wrong answers green — returning Luks here, which cannot exist on
+        // Windows, passed the whole suite. Naming BitLocker for an unknown edition is a deliberate
+        // and arguable choice (it could as easily be Device Encryption), and pinning it is what
+        // makes changing that a reviewed act rather than a silent one.
+        Assert.Equal(DiskEncryptionMethod.BitLocker, volume.Method);
+    }
+
+    /// <summary>The ordinary machine on the ordinary platform: Pro, protected, BitLocker.</summary>
+    /// <remarks>
+    /// Nothing pinned this. The same mutation run that exposed the weak assertion above showed a
+    /// Pro protected volume could return <c>FileVault</c> and the suite stayed green — the happy
+    /// path of the platform most of the fleet runs was the least-tested case in the file.
+    /// </remarks>
+    [Fact]
+    public void AProtectedVolumeOnProIsBitLocker()
+    {
+        OsqueryResults results = new();
+        results.Add("os_edition", [Row(("data", "Professional"))]);
+        results.Add("bitlocker", [Row(("drive_letter", "C:"), ("protection_status", "1"))]);
+
+        AgentVolumeReading volume = Assert.Single(Build(results).Encryption!);
+
+        Assert.Equal(DiskEncryptionMethod.BitLocker, volume.Method);
+        Assert.True(volume.Protected);
     }
 
     [Fact]

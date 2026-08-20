@@ -59,7 +59,16 @@ public enum AgentPlatform
 [JsonConverter(typeof(JsonStringEnumConverter<DiskEncryptionMethod>))]
 public enum DiskEncryptionMethod
 {
-    /// <summary>No encryption state could be read. NOT the same as unencrypted.</summary>
+    /// <summary>
+    /// No encryption state could be read, <b>or</b> one was read that cannot be GRADED without a
+    /// second reading the collection did not obtain. NOT the same as unencrypted.
+    /// </summary>
+    /// <remarks>
+    /// The second half is the Windows edition: unprotected on Home is a licensing fact and
+    /// unprotected on Pro is somebody switching encryption off, so without the edition an
+    /// unprotected volume cannot be told apart, and one of the two guesses accuses a machine that
+    /// cannot comply. Reporting the raw state and withholding the grade is the honest answer.
+    /// </remarks>
     NotObserved,
 
     /// <summary>Read, and no encryption is in force.</summary>
@@ -141,7 +150,7 @@ public enum AgentUpdateOutcome
     Succeeded,
 
     /// <summary>
-    /// The last attempt did not succeed. <b>It covers THREE states that this value cannot tell
+    /// The last attempt did not succeed. <b>It covers FOUR states that this value cannot tell
     /// apart, and a server must not be built as though it can.</b>
     /// </summary>
     /// <remarks>
@@ -149,6 +158,14 @@ public enum AgentUpdateOutcome
     /// <b>Nothing was replaced.</b> A download failure, a hash mismatch, a non-allowlisted host, a
     /// staged binary that would not execute. The machine is still on what it had; the next
     /// scheduled run tries again and no operator action is needed.
+    /// </para>
+    /// <para>
+    /// <b>A replacement was abandoned part-way through the move.</b> The current binary was moved
+    /// aside, the staged one could not be moved in, and the retained one could not be put back — so
+    /// there is no binary at the target path and the working one is stranded beside it. No swap
+    /// mark is written for a move that never completed, so automatic recovery does not run; the
+    /// local detail names the path it was left at. Told apart from the first only by asking the
+    /// machine, which is why this list exists.
     /// </para>
     /// <para>
     /// <b>Something is installed that nothing ever ran.</b> Not a lost binary and not a bad
@@ -164,11 +181,11 @@ public enum AgentUpdateOutcome
     /// design admits, and it is the same enum value as the other two.
     /// </para>
     /// <para>
-    /// The agent records a sentence naming which of the three it was, but it keeps it locally — it
+    /// The agent records a sentence naming which of the four it was, but it keeps it locally — it
     /// is what <c>merlin-agent status</c> prints and it does not cross the wire. What narrows them
     /// without asking the machine is corroborating evidence the report already carries: the version
     /// of the component that failed. A <see cref="Failed"/> whose <c>agentVersion</c> has not moved
-    /// and whose reports then stop is the third case; when it is the UPDATER that failed the agent
+    /// and whose reports then stop is the last case; when it is the UPDATER that failed the agent
     /// keeps reporting normally, and <c>updaterVersion</c> — null when the updater is absent or
     /// will not run — is the field that shows it. See <c>docs/protocol.md</c> § the report.
     /// </para>
