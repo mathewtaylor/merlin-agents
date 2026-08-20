@@ -72,8 +72,18 @@ public static class Program
                     _ => PrintUsage(),
                 };
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-            or CryptographicException or HttpRequestException)
+
+        // UNFILTERED, DELIBERATELY — the same rule as the agent's update turn, and it matters more
+        // here. A named list of the expected types reads as the more careful choice and is the
+        // weaker one: UriFormatException, NotSupportedException, ObjectDisposedException and a
+        // plain OperationCanceledException all walk straight past one. RunAsync has no inner try,
+        // so anything that escapes skips its closing AgentState.Write — and that write is what
+        // stamps LastUpdaterRunAt, which is the WITNESS a revert requires. A repeatable crash would
+        // therefore mean a broken agent could never be put back, which is the failure this whole
+        // process exists to prevent.
+#pragma warning disable CA1031
+        catch (Exception exception)
+#pragma warning restore CA1031
         {
             Console.Error.WriteLine($"merlin-updater: {exception.Message}");
             return 1;
@@ -136,6 +146,17 @@ public static class Program
             return 0;
         }
 
+        // STAMPED BEFORE ANY NETWORK WORK, exactly as the agent stamps itself at the top of a
+        // collection, and for the mirror-image reason: this is the witness the recovery rule reads
+        // to decide whether the machine was actually up. Written only at the end of the turn it sat
+        // behind a download bounded at ten minutes, so a reboot, a kill or a crash mid-run lost it
+        // — and a witness that keeps going missing is a broken agent that never gets put back.
+        DateTimeOffset? previousUpdaterRun = state.LastUpdaterRunAt;
+
+        AgentState.Write(state
+            .WithLastRun(AgentComponent.Updater, now)
+            .WithVersion(AgentComponent.Updater, AgentVersionInfo.Current));
+
         Action<string> log = operatorRequested
             ? Console.WriteLine
             : _ => { };
@@ -153,7 +174,7 @@ public static class Program
             using UpdateClient client = new(
                 state.ServerUrl, key, AgentVersionInfo.Current, state.ClockOffsetSeconds);
 
-            ComponentSwapper swapper = new(InstallLayout.Current, http, BinaryProbe.Default, log);
+            ComponentSwapper swapper = new(AgentComponent.Updater, InstallLayout.Current, http, BinaryProbe.Default, log);
 
             UpdateRunner runner = new(
                 AgentComponent.Updater,
@@ -165,10 +186,10 @@ public static class Program
 
             AgentStateData updated = await runner.RunAsync(
                 state,
-                // This updater's PREVIOUS run, read before the runner stamps this one. It is what
-                // says the machine was actually up for the window a revert is judged against; a
-                // laptop that was merely shut has a working agent, not a broken one.
-                state.LastUpdaterRunAt,
+                // This updater's PREVIOUS run, captured above before the stamp. It is what says the
+                // machine was actually up for the window a revert is judged against; a laptop that
+                // was merely shut has a working agent, not a broken one.
+                previousUpdaterRun,
                 token => client.CheckAsync(state.DeviceId, AgentRuntimeIdentifier.Current, now, token),
                 now).ConfigureAwait(false);
 

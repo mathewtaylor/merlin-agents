@@ -27,6 +27,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         SwapResult result = await swapper.SwapAsync(
@@ -56,6 +57,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         SwapResult result = await swapper.SwapAsync(
@@ -79,6 +81,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         SwapResult result = await swapper.SwapAsync(
@@ -104,6 +107,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         // The hash is CORRECT. The point is that a valid archive from an unlisted host is refused
@@ -131,6 +135,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeThatWillNotRun(), _ => { });
 
         SwapResult result = await swapper.SwapAsync(
@@ -161,6 +166,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         SwapResult result = await swapper.SwapAsync(
@@ -184,6 +190,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Refusing(HttpStatusCode.ServiceUnavailable);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         SwapResult result = await swapper.SwapAsync(
@@ -208,6 +215,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Agent,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         SwapResult first = await swapper.SwapAsync(
@@ -224,10 +232,13 @@ public sealed class ComponentSwapTests
 
         Assert.Equal(AgentUpdateOutcome.Succeeded, first.Outcome);
 
-        // Not a failure — there is nothing wrong. The other component moves on a later run, after
-        // this one has proved itself by running. A big-bang swap of both would reintroduce the
-        // single point of failure the two-binary design exists to remove.
-        Assert.Null(second.Outcome);
+        // Refused, and refused for the STRONGER of the two reasons. This swapper is the agent, so
+        // the second call asks it to overwrite its own running image — which it now knows about and
+        // declines, rather than relying on the one-move-per-run counter to catch it by accident. A
+        // big-bang swap of both would reintroduce the single point of failure the two-binary design
+        // exists to remove.
+        Assert.Equal(AgentUpdateOutcome.Failed, second.Outcome);
+        Assert.Contains("own running image", second.Detail, StringComparison.Ordinal);
         Assert.Equal("old agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
         Assert.Equal("new updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
     }
@@ -243,6 +254,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving([]);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Updater,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.2.0"), _ => { });
 
         SwapResult result = swapper.Restore(AgentComponent.Agent);
@@ -268,6 +280,7 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving([]);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Updater,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.2.0"), _ => { });
 
         SwapResult result = swapper.Restore(AgentComponent.Agent);
@@ -289,18 +302,21 @@ public sealed class ComponentSwapTests
         using HttpClient http = UpdateTestKit.Serving(archive);
 
         ComponentSwapper swapper = new(
+            AgentComponent.Updater,
             kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
 
         swapper.Restore(AgentComponent.Agent);
 
+        // The same component again, which is the only shape this can take in production: a swapper
+        // may only ever touch the one component that is not itself.
         SwapResult afterwards = await swapper.SwapAsync(
-            AgentComponent.Updater,
+            AgentComponent.Agent,
             "0.9.9",
             UpdateTestKit.AllowedEndpoint,
             UpdateTestKit.Digest(archive));
 
         Assert.Null(afterwards.Outcome);
-        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
     }
 
     /// <summary>
@@ -330,7 +346,8 @@ public sealed class ComponentSwapTests
 
         using HttpClient http = UpdateTestKit.Serving(archive);
 
-        ComponentSwapper swapper = new(kit.Layout, http, BinaryProbe.Default, _ => { });
+        ComponentSwapper swapper = new(
+            AgentComponent.Agent, kit.Layout, http, BinaryProbe.Default, _ => { });
 
         SwapResult result = await swapper.SwapAsync(
             AgentComponent.Updater,
@@ -360,7 +377,8 @@ public sealed class ComponentSwapTests
 
         using HttpClient http = UpdateTestKit.Serving(archive);
 
-        ComponentSwapper swapper = new(kit.Layout, http, BinaryProbe.Default, _ => { });
+        ComponentSwapper swapper = new(
+            AgentComponent.Agent, kit.Layout, http, BinaryProbe.Default, _ => { });
 
         SwapResult result = await swapper.SwapAsync(
             AgentComponent.Updater,

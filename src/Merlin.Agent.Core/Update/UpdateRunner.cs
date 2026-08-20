@@ -118,11 +118,11 @@ public sealed class UpdateRunner
 
         AgentComponent target = InstallLayout.Target(_self);
 
-        // Captured BEFORE the re-probe below. A binary that will not execute has no version to
-        // read, so the probe returns null — and null is the honest thing to report to Merlin, but
-        // it is useless as the identity of the release that has to be blocked from coming back. The
-        // version recorded when the swap succeeded is what names it.
-        string? versionAtSwap = state.VersionOf(target);
+        // NOTE: the identity of an outstanding release is NOT read from the probed version. That
+        // is re-asked of the binary below and a binary that will not execute has none, so it is
+        // overwritten with null — and a revert never happens in the same run as the swap, because
+        // the witness requires an intervening one. It is stamped in state at swap time instead;
+        // see AgentStateData.AgentSwappedToVersion.
 
         // What is actually on this machine, asked of the binaries rather than believed from the
         // file. This component knows its own version; the other one is asked for its.
@@ -135,7 +135,7 @@ public sealed class UpdateRunner
 
         if (ShouldRestore(state, target, previousSelfRunAt, now))
         {
-            return Recover(state, target, versionAtSwap, now);
+            return Recover(state, target, now);
         }
 
         UpdateCheck answer = await check(cancellationToken).ConfigureAwait(false);
@@ -201,7 +201,12 @@ public sealed class UpdateRunner
         {
             AgentUpdateOutcome.Succeeded => state
                 .WithVersion(target, result.InstalledVersion)
-                .WithSwappedAt(target, now)
+
+                // The ADVERTISED string, not the one the binary reported. It is what the
+                // never-install-this-again block compares against, and the two differ exactly when
+                // an operator's spelling and the binary's disagree — the case that block is least
+                // able to afford getting wrong.
+                .WithSwap(target, now, version)
                 with
             {
                 LastUpdateOutcome = AgentUpdateOutcome.Succeeded,
@@ -332,35 +337,83 @@ public sealed class UpdateRunner
             return false;
         }
 
-        return now - swappedAt > _windows.For(target)
-            && File.Exists(_layout.PreviousPathOf(target));
+        // NOTE: whether anything is RETAINED to restore is deliberately not asked here. It used to
+        // be, and a component with no retained copy — one installed where none existed, or whose
+        // `.previous` something removed — then answered "no revert due" for ever while the
+        // no-stacked-swap rule refused every future version too. That is a machine with no exit and
+        // nothing reported, which is the silence this design exists to prevent. Recover decides
+        // what to do when there is nothing to go back to, and says so.
+        return now - swappedAt > _windows.For(target);
     }
 
-    private AgentStateData Recover(
-        AgentStateData state,
-        AgentComponent target,
-        string? versionAtSwap,
-        DateTimeOffset now)
+    /// <summary>
+    /// Puts the target's previous binary back, or records why it could not be.
+    /// </summary>
+    /// <remarks>
+    /// <b>All three outcomes have to reach Merlin, and two of them used to reach nothing.</b> A
+    /// restore that fails and a restore that has nothing to restore both left the state untouched,
+    /// so the operator saw no outcome at all — and with the no-stacked-swap rule in place, a
+    /// machine with nothing retained had no route back to a working binary and no route forward to
+    /// a fixed one either. The distinction that matters is whether trying again could help: an
+    /// input/output failure might clear, so the mark stays and the next run retries; nothing
+    /// retained never will, so the mark is cleared and the release that got us here is blocked
+    /// instead.
+    /// </remarks>
+    private AgentStateData Recover(AgentStateData state, AgentComponent target, DateTimeOffset now)
     {
+        // The version that was put ON is the one blocked, not the one restored.
+        string? blocked = state.SwappedToVersionOf(target) ?? state.LastRevertedVersion;
         SwapResult result = _swapper.Restore(target);
 
         _log($"  {result.Detail}");
 
-        if (result.Outcome != AgentUpdateOutcome.Reverted)
+        if (result.Outcome == AgentUpdateOutcome.Reverted)
         {
-            return state;
+            return state
+                .WithVersion(target, result.InstalledVersion)
+                .WithSwap(target, null, null)
+                with
+            {
+                LastRevertedVersion = blocked,
+                LastUpdateOutcome = AgentUpdateOutcome.Reverted,
+                LastUpdateAt = now,
+                LastUpdateDetail = result.Detail,
+                PendingComponent = null,
+                PendingVersion = null,
+                PendingPackageEndpoint = null,
+                PendingSha256 = null,
+            };
         }
 
-        return state
-            .WithVersion(target, result.InstalledVersion)
-            .WithSwappedAt(target, null)
-            with
+        if (result.Outcome == AgentUpdateOutcome.Failed)
         {
-            // The version that was put ON is the one blocked, not the one restored.
-            LastRevertedVersion = versionAtSwap ?? state.LastRevertedVersion,
-            LastUpdateOutcome = AgentUpdateOutcome.Reverted,
+            // Something on the disk refused. Keep the mark so the next run tries again — but say
+            // so, because a restore failing quietly is a machine drifting with nobody told.
+            return state with
+            {
+                LastUpdateOutcome = AgentUpdateOutcome.Failed,
+                LastUpdateAt = now,
+                LastUpdateDetail = result.Detail,
+            };
+        }
+
+        // Nothing was retained, so there is no way back and no amount of waiting produces one.
+        // Clear the mark — leaving it set refuses every future version too — and block only the
+        // release that got us here, so the machine stops re-downloading a package it has already
+        // proved does not work while an operator publishes or pins a different one.
+        _log($"  {InstallLayout.FileName(target)} cannot be put back, so this machine is waiting "
+            + "for a different version to be advertised.");
+
+        return state.WithSwap(target, null, null) with
+        {
+            LastRevertedVersion = blocked,
+            LastUpdateOutcome = AgentUpdateOutcome.Failed,
             LastUpdateAt = now,
-            LastUpdateDetail = result.Detail,
+            LastUpdateDetail =
+                $"{InstallLayout.FileName(target)} has not run since it was replaced"
+                + $"{(blocked is null ? string.Empty : $" with {blocked}")}, and no previous binary "
+                + "was retained to put back. That version will not be installed here again; "
+                + "advertise a different one.",
             PendingComponent = null,
             PendingVersion = null,
             PendingPackageEndpoint = null,
@@ -382,7 +435,7 @@ public sealed class UpdateRunner
             && state.LastRunOf(target) is { } lastRun
             && lastRun > swappedAt)
         {
-            state = state.WithSwappedAt(target, null);
+            state = state.WithSwap(target, null, null);
         }
 
         if (state.PendingComponent == _self

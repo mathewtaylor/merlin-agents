@@ -36,10 +36,12 @@ public sealed record SwapResult(AgentUpdateOutcome? Outcome, string Detail, stri
 /// <remarks>
 /// <para>
 /// <b>The updater replaces the AGENT; the agent replaces the UPDATER. Neither ever replaces its own
-/// running image.</b> That is the core safety property of the whole design and it is enforced here,
-/// in <see cref="SwapAsync"/>, rather than trusted to callers — a single self-updating binary has
-/// one unrecoverable failure, and if the image it swaps in cannot execute there is nothing left
-/// running on the machine to put the old one back.
+/// running image.</b> That is the core safety property of the whole design, and it is enforced here
+/// — in <see cref="SwapAsync"/> and in <see cref="Restore"/>, against the component named at
+/// construction — rather than trusted to callers. A single self-updating binary has one
+/// unrecoverable failure: if the image it swaps in cannot execute there is nothing left running on
+/// the machine to put the old one back. The constructor takes the running component for no other
+/// reason; without it this sentence was describing something two call sites happened to do.
 /// </para>
 /// <para>
 /// <b>The order is download → verify → extract → EXECUTE → swap → retain the previous.</b> Running
@@ -64,6 +66,7 @@ public sealed class ComponentSwapper
     /// <summary>The largest archive that will be downloaded, as a sanity bound.</summary>
     private const long MaximumArchiveBytes = 256L * 1024 * 1024;
 
+    private readonly AgentComponent _self;
     private readonly InstallLayout _layout;
     private readonly HttpClient _http;
     private readonly BinaryProbe _probe;
@@ -72,11 +75,19 @@ public sealed class ComponentSwapper
     private bool _swapped;
 
     /// <summary>Initialises a new instance of the <see cref="ComponentSwapper"/> class.</summary>
+    /// <param name="self">
+    /// Which component is running. <b>It is here so the never-replace-your-own-image rule is
+    /// actually enforced by this class rather than merely described by it.</b> Without it the
+    /// swapper cannot tell whose image it is overwriting, so the property rested entirely on two
+    /// call sites passing the right argument — and this is public API in a library both binaries
+    /// link, so the next caller would have believed the comment.
+    /// </param>
     /// <param name="layout">Where the binaries live.</param>
     /// <param name="http">The client used to fetch a package.</param>
     /// <param name="probe">How a staged binary is executed before anything is committed.</param>
     /// <param name="log">Where progress and refusals are written.</param>
     public ComponentSwapper(
+        AgentComponent self,
         InstallLayout layout,
         HttpClient http,
         BinaryProbe probe,
@@ -87,11 +98,21 @@ public sealed class ComponentSwapper
         ArgumentNullException.ThrowIfNull(probe);
         ArgumentNullException.ThrowIfNull(log);
 
+        _self = self;
         _layout = layout;
         _http = http;
         _probe = probe;
         _log = log;
     }
+
+    /// <summary>
+    /// The refusal issued when something asks this process to replace its own running image.
+    /// </summary>
+    /// <param name="component">The component that was asked for.</param>
+    /// <returns>The explanation.</returns>
+    public static string SelfSwapRefusal(AgentComponent component) =>
+        $"{InstallLayout.FileName(component)} is the binary making this call and will not replace "
+        + "its own running image. The other component does that.";
 
     /// <summary>
     /// Replaces one component with a named version, or explains why it did not.
@@ -115,6 +136,14 @@ public sealed class ComponentSwapper
         // NEVER BOTH IN ONE RUN. If the agent and the updater are both behind, one moves now and
         // the other on a later run — after this one has proved itself by running. Enforced here so
         // no caller can decide otherwise.
+        // THE RULE, ENFORCED RATHER THAN ASSUMED. A process that overwrote its own image with one
+        // that cannot execute would leave nothing running here able to put the old one back, which
+        // is the single unrecoverable failure the two-binary design exists to remove.
+        if (component == _self)
+        {
+            return SwapResult.Failed(SelfSwapRefusal(component));
+        }
+
         if (_swapped)
         {
             return SwapResult.NothingToDo(
@@ -242,6 +271,13 @@ public sealed class ComponentSwapper
         string previous = _layout.PreviousPathOf(component);
         string current = _layout.PathOf(component);
 
+        // Restoring your own image is the same prohibition as swapping it: the file being replaced
+        // is the one this process is running out of.
+        if (component == _self)
+        {
+            return SwapResult.Failed(SelfSwapRefusal(component));
+        }
+
         if (_swapped)
         {
             return SwapResult.NothingToDo("A component was already moved in this run.");
@@ -256,13 +292,32 @@ public sealed class ComponentSwapper
         try
         {
             string broken = current + ".failed";
+            bool movedAside = false;
 
             if (File.Exists(current))
             {
                 File.Move(current, broken, overwrite: true);
+                movedAside = true;
             }
 
-            File.Move(previous, current, overwrite: true);
+            try
+            {
+                File.Move(previous, current, overwrite: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // Put the broken one back rather than leaving NOTHING there. It does not work, but
+                // a component that is absent cannot even be diagnosed, and on the agent that is up
+                // to a day of silence before anything looks at this machine again. Commit already
+                // reasons this way for the same reason.
+                if (movedAside && !File.Exists(current))
+                {
+                    TryMoveBack(broken, current);
+                }
+
+                throw;
+            }
+
             MakeExecutable(current);
 
             _swapped = true;
@@ -392,6 +447,19 @@ public sealed class ComponentSwapper
         return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 
+    /// <summary>
+    /// Sets the executable bit, and never throws.
+    /// </summary>
+    /// <remarks>
+    /// <b>It must not be able to fail a swap that has already landed.</b> Called after the move, a
+    /// throw was caught as "the component was not replaced" — while the new binary was in fact in
+    /// place. The swap mark was then never recorded, so the no-stacked-swap rule did not engage,
+    /// and the next run replaced it again and overwrote the retained copy with an unproven binary:
+    /// the exact hole that rule closed, reopened by another route. Every path that needs the bit
+    /// has a check downstream that catches the consequence honestly — the probe for a staged
+    /// binary, the other component's revert for an installed one — so swallowing here loses no
+    /// signal.
+    /// </remarks>
     private static void MakeExecutable(string path)
     {
         if (OperatingSystem.IsWindows())
@@ -399,11 +467,37 @@ public sealed class ComponentSwapper
             return;
         }
 
-        File.SetUnixFileMode(
-            path,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
-            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
-            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        try
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The move preserves the mode already set on the staged file, so this is belt to that
+            // braces. If the bit really is missing, the binary will not run and the component that
+            // is watching it will put the previous one back.
+        }
+    }
+
+    /// <summary>Moves a file back, swallowing a second failure.</summary>
+    /// <remarks>
+    /// Reached only while already handling a failure, where there is nothing further to try and the
+    /// caller's own message is the one worth reporting.
+    /// </remarks>
+    private static void TryMoveBack(string from, string to)
+    {
+        try
+        {
+            File.Move(from, to, overwrite: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Nothing further to try.
+        }
     }
 
     private static void TryDeleteDirectory(string path)

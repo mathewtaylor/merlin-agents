@@ -37,6 +37,17 @@ namespace Merlin.Agent.Core.State;
 /// <param name="LastUpdaterRunAt">When the updater binary last executed, on the same terms.</param>
 /// <param name="AgentSwappedAt">When the agent binary was last replaced, or null.</param>
 /// <param name="UpdaterSwappedAt">When the updater binary was last replaced, or null.</param>
+/// <param name="AgentSwappedToVersion">
+/// The version the agent binary was replaced WITH, as advertised, or null.
+/// <b>It is a field of its own because the probed version cannot survive to be read.</b>
+/// <see cref="AgentVersionInstalled"/> is re-asked of the binary on every run, and a binary that
+/// will not execute has no version to give, so it is overwritten with null — while a revert can
+/// never happen in the same run as the swap, because the recovery witness requires an intervening
+/// run. The identity of the release that has to be blocked was therefore always gone by the time
+/// anything needed it, and <see cref="LastRevertedVersion"/> was null on every revert that
+/// mattered. Stamped from the ADVERTISED string, because that is what the block compares against.
+/// </param>
+/// <param name="UpdaterSwappedToVersion">The same, for the updater binary.</param>
 /// <param name="PendingComponent">
 /// The component that still needs moving to <see cref="PendingVersion"/>, or null.
 /// <b>This exists because the advertisement goes quiet at exactly the wrong moment.</b> Merlin
@@ -74,6 +85,8 @@ public sealed record AgentStateData(
     DateTimeOffset? LastUpdaterRunAt = null,
     DateTimeOffset? AgentSwappedAt = null,
     DateTimeOffset? UpdaterSwappedAt = null,
+    string? AgentSwappedToVersion = null,
+    string? UpdaterSwappedToVersion = null,
     AgentComponent? PendingComponent = null,
     string? PendingVersion = null,
     string? PendingPackageEndpoint = null,
@@ -122,14 +135,33 @@ public sealed record AgentStateData(
             ? this with { LastAgentRunAt = instant }
             : this with { LastUpdaterRunAt = instant };
 
-    /// <summary>Records when a component's binary was replaced, or clears the mark.</summary>
+    /// <summary>The version a component's binary was replaced with, as advertised.</summary>
+    /// <param name="component">The component.</param>
+    /// <returns>The version, or null when nothing is outstanding.</returns>
+    public string? SwappedToVersionOf(AgentComponent component) =>
+        component == AgentComponent.Agent ? AgentSwappedToVersion : UpdaterSwappedToVersion;
+
+    /// <summary>
+    /// Records that a component's binary was replaced, or clears the mark.
+    /// </summary>
+    /// <remarks>
+    /// <b>The instant and the version move together, always.</b> They answer one question — is
+    /// there an unproven swap outstanding, and which release is it — and two setters would let a
+    /// caller record half of it. The mark decides whether a revert is due; the version decides what
+    /// is blocked afterwards, and a mark with no version is what made the anti-oscillation guard
+    /// dead code.
+    /// </remarks>
     /// <param name="component">The component.</param>
     /// <param name="instant">The instant, or null to clear.</param>
+    /// <param name="version">The advertised version installed, or null to clear.</param>
     /// <returns>The updated state.</returns>
-    public AgentStateData WithSwappedAt(AgentComponent component, DateTimeOffset? instant) =>
+    public AgentStateData WithSwap(
+        AgentComponent component,
+        DateTimeOffset? instant,
+        string? version) =>
         component == AgentComponent.Agent
-            ? this with { AgentSwappedAt = instant }
-            : this with { UpdaterSwappedAt = instant };
+            ? this with { AgentSwappedAt = instant, AgentSwappedToVersion = version }
+            : this with { UpdaterSwappedAt = instant, UpdaterSwappedToVersion = version };
 }
 
 /// <summary>

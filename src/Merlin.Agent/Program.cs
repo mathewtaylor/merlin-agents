@@ -246,6 +246,14 @@ public static class Program
 
             AgentState.Write(state);
 
+            // THE UPDATE TURN COMES BEFORE THE EARLY EXIT, and that ordering is load-bearing.
+            // Recovery runs before any server call and needs no network whatever — so a machine
+            // that cannot reach Merlin, whether from an outage, a proxy change, an expired
+            // certificate or a refused signature, is exactly the machine that must still be able to
+            // put a broken updater back. Gating this on a successful report made the one failure
+            // mode most in need of recovery the one that never got it.
+            await MaintainUpdaterAsync(state, previousAgentRun, key).ConfigureAwait(false);
+
             if (!result.Succeeded)
             {
                 Console.Error.WriteLine($"Report refused: {result.Detail}");
@@ -253,8 +261,6 @@ public static class Program
             }
 
             Console.WriteLine(result.Detail);
-
-            await MaintainUpdaterAsync(state, previousAgentRun, key).ConfigureAwait(false);
 
             return 0;
         }
@@ -265,9 +271,11 @@ public static class Program
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Every failure here is swallowed.</b> The report has already been sent by the time this
-    /// runs; nothing it can do is worth failing a collection over, and an exception escaping would
-    /// give the scheduler a failed run for a machine that is perfectly healthy.
+    /// <b>Every failure here is swallowed.</b> The report has already been ATTEMPTED by the time
+    /// this runs — successfully or not, since recovery needs no network and a machine that cannot
+    /// reach Merlin still has to be able to put a broken updater back — so nothing this does is
+    /// worth failing a collection over, and an exception escaping would give the scheduler a failed
+    /// run for a machine that is perfectly healthy.
     /// </para>
     /// <para>
     /// <b>Which is why the catch is unfiltered, deliberately, and must stay that way.</b> A named
@@ -294,7 +302,7 @@ public static class Program
             using UpdateClient client = new(
                 state.ServerUrl, key, Version, state.ClockOffsetSeconds);
 
-            ComponentSwapper swapper = new(InstallLayout.Current, http, BinaryProbe.Default, Console.WriteLine);
+            ComponentSwapper swapper = new(AgentComponent.Agent, InstallLayout.Current, http, BinaryProbe.Default, Console.WriteLine);
 
             UpdateRunner runner = new(
                 AgentComponent.Agent,
