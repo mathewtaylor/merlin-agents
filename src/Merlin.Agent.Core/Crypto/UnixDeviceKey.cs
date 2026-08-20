@@ -1,8 +1,8 @@
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
-using Merlin.Agent.State;
+using Merlin.Agent.Core.State;
 
-namespace Merlin.Agent.Crypto;
+namespace Merlin.Agent.Core.Crypto;
 
 /// <summary>
 /// The macOS and Linux key store — a PKCS#8 private key in a root-only file.

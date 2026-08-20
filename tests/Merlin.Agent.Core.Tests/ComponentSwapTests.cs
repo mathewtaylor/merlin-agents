@@ -1,0 +1,374 @@
+using System.Net;
+using Merlin.Agent.Core.Contracts;
+using Merlin.Agent.Core.Update;
+using Xunit;
+
+namespace Merlin.Agent.Core.Tests;
+
+/// <summary>
+/// Tests for the shared component-swap routine.
+/// </summary>
+/// <remarks>
+/// <b>Every one of these is a case where the machine must end up on the binary it already had.</b>
+/// The routine replaces a SYSTEM binary unattended, on a machine nobody is watching, so the
+/// interesting assertions are all negative: the running component is untouched, the previous one is
+/// retained, and the failure is reported rather than swallowed.
+/// </remarks>
+public sealed class ComponentSwapTests
+{
+    [Fact]
+    public async Task ASuccessfulSwapReplacesTheTargetAndRetainsThePrevious()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, result.Outcome);
+        Assert.Equal("0.9.9", result.InstalledVersion);
+        Assert.Equal("new updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PreviousPathOf(AgentComponent.Updater)));
+
+        // The component that was NOT named is never touched — this is the running image of whoever
+        // called, and overwriting it is the single point of failure the design exists to remove.
+        Assert.False(File.Exists(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task AZipArchiveWorksTooBecauseWindowsShipsOne()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildZipArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, result.Outcome);
+        Assert.Equal("new updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task AHashMismatchInstallsNothing()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            new string('a', 64));
+
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Contains("Hash mismatch", result.Detail, StringComparison.Ordinal);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+        Assert.False(File.Exists(kit.Layout.PreviousPathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task AnAddressOffTheAllowlistIsRefusedBeforeAnythingIsFetched()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        // The hash is CORRECT. The point is that a valid archive from an unlisted host is refused
+        // anyway — a compromised or misconfigured Merlin can name an address, and this is the check
+        // that means naming one achieves nothing.
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            "https://github.com.attacker.example/merlin/pkg.tar.gz",
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Contains("host allowlist", result.Detail, StringComparison.Ordinal);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task AStagedBinaryThatWillNotExecuteLeavesTheRunningOneInPlace()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "quarantined");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeThatWillNotRun(), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        // Download fine, hash fine, extraction fine — and still nothing is replaced, because a
+        // digest proves the bytes arrived and says nothing about whether they run here.
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Contains("would not execute", result.Detail, StringComparison.Ordinal);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+        Assert.False(File.Exists(kit.Layout.PreviousPathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task AnArchiveWithoutTheNamedComponentInstallsNothing()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        // An archive built before auto-update shipped: the agent alone. It downloads and verifies
+        // perfectly, and there is still nothing in it to install.
+        byte[] archive = UpdateTestKit.BuildAgentOnlyArchive("new agent");
+
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Contains("carries no", result.Detail, StringComparison.Ordinal);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task ADownloadThatFailsInstallsNothing()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        using HttpClient http = UpdateTestKit.Refusing(HttpStatusCode.ServiceUnavailable);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            new string('a', 64));
+
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task NeverBothComponentsInOneRun()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "old agent");
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        SwapResult first = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        SwapResult second = await swapper.SwapAsync(
+            AgentComponent.Agent,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, first.Outcome);
+
+        // Not a failure — there is nothing wrong. The other component moves on a later run, after
+        // this one has proved itself by running. A big-bang swap of both would reintroduce the
+        // single point of failure the two-binary design exists to remove.
+        Assert.Null(second.Outcome);
+        Assert.Equal("old agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+        Assert.Equal("new updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public void RestorePutsThePreviousBinaryBackAndKeepsTheBrokenOne()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "broken agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "working agent");
+
+        using HttpClient http = UpdateTestKit.Serving([]);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.2.0"), _ => { });
+
+        SwapResult result = swapper.Restore(AgentComponent.Agent);
+
+        Assert.Equal(AgentUpdateOutcome.Reverted, result.Outcome);
+        Assert.Equal("0.2.0", result.InstalledVersion);
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+
+        // The failed binary is kept, not deleted. Somebody has to be able to work out what went
+        // wrong on the one machine that hit it.
+        Assert.Equal(
+            "broken agent",
+            File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent) + ".failed"));
+    }
+
+    [Fact]
+    public void RestoreWithNothingRetainedChangesNothing()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "the only agent");
+
+        using HttpClient http = UpdateTestKit.Serving([]);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.2.0"), _ => { });
+
+        SwapResult result = swapper.Restore(AgentComponent.Agent);
+
+        Assert.Null(result.Outcome);
+        Assert.Equal("the only agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task ARestoreAlsoCountsAsThisRunsOneMove()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "broken agent");
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "working agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            kit.Layout, http, UpdateTestKit.ProbeReporting("0.9.9"), _ => { });
+
+        swapper.Restore(AgentComponent.Agent);
+
+        SwapResult afterwards = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "0.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Null(afterwards.Outcome);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    /// <summary>
+    /// Drives the REAL <see cref="BinaryProbe"/> end to end, so the seam every other test uses is
+    /// not the only thing ever exercised.
+    /// </summary>
+    /// <remarks>
+    /// Unix only, and deliberately: a shell script with a shebang is a genuine executable there,
+    /// where Windows would need a compiled <c>.exe</c> a unit test cannot manufacture for four
+    /// architectures. The CI core job runs on Linux, so this runs on every push.
+    /// </remarks>
+    [Fact]
+    public async Task TheRealProbeExecutesAStagedBinaryBeforeAnythingIsCommitted()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive(
+            "#!/bin/sh\necho 9.9.9\n",
+            "#!/bin/sh\necho 9.9.9\n");
+
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(kit.Layout, http, BinaryProbe.Default, _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "9.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, result.Outcome);
+        Assert.Equal("9.9.9", result.InstalledVersion);
+    }
+
+    [Fact]
+    public async Task TheRealProbeRefusesAStagedBinaryThatCannotRun()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        // Not a program. This is what a corrupted download, a wrong-architecture binary or a
+        // quarantined file looks like at the moment of execution.
+        byte[] archive = UpdateTestKit.BuildArchive("nope", "not a program at all");
+
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(kit.Layout, http, BinaryProbe.Default, _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "9.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+}

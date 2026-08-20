@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Merlin.Agent.Core.Contracts;
 using Merlin.Agent.Core.Crypto;
-using Merlin.Agent.Crypto;
 
 namespace Merlin.Agent.Transport;
 

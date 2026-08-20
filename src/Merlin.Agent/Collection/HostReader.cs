@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Runtime.Versioning;
 using Merlin.Agent.Core.Collection;
-using Merlin.Agent.Platform;
+using Merlin.Agent.Core.Platform;
 
 namespace Merlin.Agent.Collection;
 

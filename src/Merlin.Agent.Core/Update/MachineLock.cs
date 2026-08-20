@@ -1,0 +1,94 @@
+namespace Merlin.Agent.Core.Update;
+
+/// <summary>
+/// A machine-wide lock, held for the whole of a run by either component.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A swapper never swaps a target that is currently running.</b> Both binaries take this lock
+/// before they do anything and hold it until they exit, so a scheduled agent collection and a
+/// scheduled updater run can never overlap — and the swap therefore never lands on a binary that is
+/// mid-execution. On Windows that would fail anyway with a sharing violation; on Unix it would
+/// silently succeed and hand the running process an inode nobody can see, which is worse.
+/// </para>
+/// <para>
+/// <b>A lock FILE opened with <see cref="FileShare.None"/>, on every platform.</b> .NET implements
+/// that share mode with <c>flock(2)</c> on Unix and with a mandatory OS share lock on Windows, so
+/// this IS the mechanism the design calls for. A named mutex was the obvious Windows alternative
+/// and was rejected: a mutex is re-entrant for the thread that owns it, so a second acquisition
+/// inside the same process SUCCEEDS — which would make the contention guarantee weaker on exactly
+/// the platform the fleet mostly runs, and would make the test that proves it vacuous there. One
+/// mechanism, one behaviour, one test that means the same thing everywhere.
+/// </para>
+/// <para>
+/// <b>Failing to acquire is not an error.</b> The other component is running; there is nothing
+/// wrong and nothing to report. The caller exits quietly and the scheduler fires again.
+/// </para>
+/// </remarks>
+public sealed class MachineLock : IDisposable
+{
+    private readonly FileStream _handle;
+
+    private MachineLock(FileStream handle) => _handle = handle;
+
+    /// <summary>The lock file's path within a state directory.</summary>
+    /// <param name="stateDirectory">The state directory.</param>
+    /// <returns>The absolute path.</returns>
+    public static string PathIn(string stateDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
+
+        return Path.Combine(stateDirectory, "merlin-agent.lock");
+    }
+
+    /// <summary>
+    /// Takes the lock, waiting up to <paramref name="timeout"/> for whoever holds it.
+    /// </summary>
+    /// <remarks>
+    /// The wait exists because an agent collection takes a couple of seconds and an updater that
+    /// gave up instantly would skip a whole day's check over a two-second overlap. It is short,
+    /// because a component that cannot get in has nothing useful to do while it waits.
+    /// </remarks>
+    /// <param name="stateDirectory">The directory the lock file lives in.</param>
+    /// <param name="timeout">How long to keep trying.</param>
+    /// <returns>The held lock, or <c>null</c> when the other component has it.</returns>
+    public static MachineLock? TryAcquire(string stateDirectory, TimeSpan timeout)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
+
+        Directory.CreateDirectory(stateDirectory);
+
+        string path = PathIn(stateDirectory);
+        DateTime deadline = DateTime.UtcNow + timeout;
+
+        while (true)
+        {
+            try
+            {
+                return new MachineLock(new FileStream(
+                    path,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None));
+            }
+            catch (IOException)
+            {
+                // Held by the other component. Nothing is wrong; wait a moment and try again.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // On some platforms a share violation surfaces this way. Same meaning.
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                return null;
+            }
+
+            Thread.Sleep(250);
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose() => _handle.Dispose();
+}

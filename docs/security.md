@@ -157,6 +157,33 @@ hand, because the script vouches only for what it verified against a pinned hash
 Trusted Signing for Windows, an Apple Developer ID for macOS) is worth resolving before wide
 distribution.
 
+### Unattended updates
+
+The same reasoning applies with more weight once a machine can replace its own binaries without
+anyone present, and **`merlin-updater` is now the higher-value target of the two** — it is the
+process that replaces a SYSTEM binary. Four properties bound it:
+
+1. **Merlin advertises; it never pushes.** The whole response is a version, an address and a hash.
+   There is no verb the machine dispatches on, and the server cannot reach a machine that does not
+   call it.
+2. **A compile-time host allowlist in both binaries.** Packages are fetched only from the GitHub
+   release hosts, whatever a deployment is configured to advertise, and the final address is
+   re-checked after redirects. A SERVER-side allowlist would protect nothing against the threat it
+   names — whoever can set the address can set the allowlist beside it — so the list is baked in and
+   **server configuration alone cannot redirect a fleet**. This pins the distribution CHANNEL where
+   a signature pins the PUBLISHER, and is weaker than signing: anyone who can publish a release on
+   those hosts is trusted by it. The cost is that mirroring the binaries elsewhere needs a rebuilt
+   agent.
+3. **The staged binary is executed once before the running one is replaced.** A digest proves the
+   bytes arrived intact and says nothing about whether they run here.
+4. **Neither component ever replaces its own running image**, so whatever a bad release breaks,
+   something on the machine is still running that can put the previous binary back.
+
+The residual is both binaries broken at once — a release bad in both, or an antivirus engine
+quarantining both. Nothing on the machine recovers and it needs a manual reinstall; staged rollout
+is what bounds that to one or two machines instead of the fleet, and is not optional for that
+reason.
+
 ---
 
 ## 6. What the agent can reach
@@ -166,7 +193,11 @@ what reading disk-encryption state and the local security policy requires. It ma
 requests to exactly one host — the Merlin deployment it enrolled with, recorded in its state file —
 and listens on nothing.
 
-It writes to two files, in one directory per platform:
+It makes one further outbound request, on the updater's daily schedule: a signed `GET` to the same
+deployment asking what version it should be running, and — only if it is told a different one — a
+download from an allowlisted release host. Nothing else is contacted, ever.
+
+It writes to that same directory per platform:
 
 | Platform | Directory |
 |---|---|
@@ -175,5 +206,12 @@ It writes to two files, in one directory per platform:
 | Linux | `/var/lib/merlin-agent` |
 
 `state.json` holds no secret and is readable by anyone curious — that is the point of it, and it is
-what `merlin-agent status` prints. `device.key` exists only where the key is software-held, and is
-protected as described in § 2.
+what `merlin-agent status` prints. It also records what each component is running, when each last
+ran, and what the last swap did, which is what makes an unattended update inspectable on the machine
+rather than only in Merlin. `device.key` exists only where the key is software-held, and is
+protected as described in § 2. `merlin-agent.lock` is what keeps the two components from ever
+running at once, and a `staging/` directory is used and removed during a swap.
+
+**The updater uses the agent's identity, not a second one.** Same state file, same device key, same
+directory, same privilege. A second enrolment would put a second credential at rest on every machine
+for no gain.

@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
-using Merlin.Agent.Platform;
+using Merlin.Agent.Core.Platform;
 
-namespace Merlin.Agent.Crypto;
+namespace Merlin.Agent.Core.Crypto;
 
 /// <summary>Where a device's private key is held.</summary>
 public enum KeyAttestation
@@ -128,7 +128,7 @@ public static class DeviceKey
         ArgumentNullException.ThrowIfNull(key);
 
         byte[] signature = key.SignData(
-            Core.Crypto.AgentSignature.BytesToSign(canonical), HashAlgorithmName.SHA256);
+            AgentSignature.BytesToSign(canonical), HashAlgorithmName.SHA256);
 
         return Convert.ToBase64String(signature);
     }

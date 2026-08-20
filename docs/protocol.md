@@ -45,15 +45,17 @@ Every request carries these headers:
 | `Merlin-Nonce` | 128 bits, Base64Url |
 | `Merlin-Signature` | Base64, ECDSA P-256 / SHA-256, IEEE P1363 (fixed 64-byte r‖s) |
 | `Merlin-Agent-Version` | semver |
+| `Merlin-Agent-Rid` | this machine's runtime identifier. **Update check only.** |
 
 ### The canonical string
 
 ```
 report / rotate:   deviceId  \n  timestamp  \n  nonce  \n  sha256hex(body)
 enrol:             "enrol"   \n  timestamp  \n  nonce  \n  sha256hex(body)
+update:            "update"  \n  deviceId   \n  timestamp  \n  nonce  \n  rid
 ```
 
-Joined with `\n` (0x0A). Signed as UTF-8. Three properties are load-bearing:
+Joined with `\n` (0x0A). Signed as UTF-8. Four properties are load-bearing:
 
 **The body hash is over the RAW BYTES.** The agent hashes exactly the bytes it is about to send; the
 server hashes exactly the bytes it received. No JSON canonicalisation is involved anywhere. Any
@@ -66,7 +68,16 @@ a re-rendered timestamp would let two correct implementations disagree about whe
 
 **The device id is bound in.** A signature captured from one device cannot be replayed against
 another's endpoint. Enrolment uses a fixed context label in its place, which also domain-separates
-the two signature kinds.
+the signature kinds — and the update check carries BOTH, so an update-check signature can never be
+presented as a report signature for a device whose id happened to be the literal `update`.
+
+**The update check has no body hash and signs the runtime identifier instead.** It is a `GET`, so
+there is nothing to hash; and the runtime identifier decides which architecture's binary is
+advertised, so leaving it outside the signature would let anything between the machine and Merlin
+change which package the machine is pointed at. Where the machine's architecture is one nothing is
+built for, the field is signed as an EMPTY string rather than omitted — the server joins
+`rid ?? ""`, so a missing field would produce a string it cannot reconstruct and the machine would
+be refused instead of told there is nothing for it.
 
 ---
 
@@ -124,7 +135,56 @@ than three that can drift apart:
 | `hardening.secureBootEnabled` | UEFI Secure Boot | System Integrity Protection | UEFI Secure Boot |
 | `hardening.tpmPresent` | TPM present and enabled | Apple Secure Enclave | TPM present |
 
+Two further fields are about the agent itself rather than the machine:
+
+| Field | Meaning |
+|---|---|
+| `updaterVersion` | the companion updater's version, or `null` when it is absent or would not run |
+| `lastUpdateOutcome` | `Succeeded`, `Failed`, `Reverted`, or `null` when nothing has been attempted |
+
+**The outcome is REPORTED, never inferred.** A server watching only `agentVersion` cannot tell
+"updated and rolled back" from "never attempted", because both leave the version unmoved — and a
+silent failed update is the worst thing auto-update can produce. `Reverted` is deliberately distinct
+from `Failed`: a revert means a bad binary reached the machine and was survived, which is the case a
+staged rollout exists to catch, whereas `Failed` means nothing was replaced at all.
+
 **202** on acceptance.
+
+## `GET /api/agent/update`
+
+The only READ on this surface, and the only thing Merlin ever says to a machine that looks
+unprompted. Device-signed with the `update` canonical string above, no body, and it changes nothing
+about the device.
+
+**200** — the version this device should be running:
+
+```json
+{ "version": "0.3.0", "packageEndpoint": "https://github.com/…/merlin-agent-win-x64.zip",
+  "sha256": "…" }
+```
+
+**A version, an address and a hash. Nothing else, ever.** There is no verb, no arguments, no path,
+no script and nothing the machine dispatches on. The moment the response can say anything except
+"the version you should be running is X, here, with this hash", this is a remote-command channel
+wearing a different hat — which the agent does not have and is not getting.
+
+**204** — nothing to do. The machine is already where it should be, its rollout ring is not due yet,
+or the deployment has named no version at all. **This is the ORDINARY answer and is never an
+error.** Treating it as one would have a healthy fleet reporting a broken update every day.
+
+**404** — this deployment does not offer updates: an older Merlin, or the agent surface switched
+off. The machine keeps reporting exactly as before.
+
+The agent applies two guards to whatever comes back, and neither is negotiable:
+
+- **A compile-time host allowlist**, checked before a single byte is fetched and re-checked on the
+  final address after redirects. Merlin has its own allowlist, but that catches a typo and nothing
+  else — whoever can set `packageEndpoint` can set the server's allowlist beside it. Baking the list
+  into the binaries is what means **server configuration alone cannot redirect a fleet**. It pins
+  the distribution channel where a signature would pin the publisher, and is weaker than signing.
+- **The staged binary is EXECUTED once before the running one is replaced.** A digest proves the
+  bytes arrived intact and says nothing about whether they run on this machine; a quarantine, a
+  wrong architecture and a missing library all fail here, with the working binary still in place.
 
 ## `POST /api/agent/rotate`
 
@@ -165,6 +225,10 @@ applies the offset and retries once when the difference exceeds 30 seconds.
 | Nonce cache window | the skew tolerance |
 | Maximum body | 256 KB |
 | Report cadence | every 6 h, jittered |
+| Update-check cadence | daily, jittered by up to 2 h |
+| Maximum package archive | 256 MB |
+| Silence before a replaced agent is put back | 24 h — four missed collections |
+| Silence before a replaced updater is put back | 72 h — three missed checks |
 | Enrolment key lifetime | 30 days |
 
 Replay defence is **timestamp plus nonce, not a counter.** A monotonic counter was rejected because

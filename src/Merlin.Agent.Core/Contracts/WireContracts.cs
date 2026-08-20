@@ -130,6 +130,55 @@ public sealed record AgentRotateRequest(string NewPublicKey, string KeyAttestati
 public sealed record AgentRefusal(string Message, long ServerTime);
 
 /// <summary>
+/// What happened the last time a component on this machine tried to replace the other one. Mirrors
+/// Merlin's <c>AgentUpdateOutcome</c> exactly — the value crosses the wire by NAME, so the two
+/// lists must stay in step.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<AgentUpdateOutcome>))]
+public enum AgentUpdateOutcome
+{
+    /// <summary>The staged binary verified, executed once and replaced the running one.</summary>
+    Succeeded,
+
+    /// <summary>
+    /// The attempt did not complete — a download failure, a hash mismatch, a non-allowlisted host,
+    /// or a staged binary that would not execute. <b>Nothing was replaced</b>, so the machine is
+    /// still on what it had.
+    /// </summary>
+    Failed,
+
+    /// <summary>
+    /// A swap was made and then undone: the replaced component did not run inside its window, so
+    /// the other component restored the previous binary. This is mutual recovery working, and it
+    /// is deliberately distinct from <see cref="Failed"/> — a revert means a bad binary reached the
+    /// machine and was survived, which is the case staged rollout exists to catch.
+    /// </summary>
+    Reverted,
+}
+
+/// <summary>
+/// What Merlin ADVERTISES to a machine asking whether it should be running something else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A version, an address and a hash. Nothing else, ever.</b> This record is the client half of
+/// the reason the Endpoints module's "no remote-command channel" deferral still stands: there is no
+/// verb here, no arguments, no path, no script and nothing this agent dispatches on. The moment it
+/// could say anything except "the version you should be running is X, here, with this hash", this
+/// would be a command channel wearing a different hat.
+/// </para>
+/// <para>
+/// <b>The address is still checked against a COMPILE-TIME allowlist before anything is fetched.</b>
+/// A server-side allowlist protects nothing against the threat it names, because whoever can set
+/// the address can set the allowlist beside it. See <c>PackageHosts</c>.
+/// </para>
+/// </remarks>
+/// <param name="Version">The version this device should be running.</param>
+/// <param name="PackageEndpoint">Where to fetch that version's archive for this platform.</param>
+/// <param name="Sha256">The archive's expected SHA-256, lower-case hex.</param>
+public sealed record AgentUpdateResponse(string Version, string PackageEndpoint, string Sha256);
+
+/// <summary>
 /// The posture payload, posted on every collection.
 /// </summary>
 /// <remarks>
@@ -157,6 +206,17 @@ public sealed record AgentRefusal(string Message, long ServerTime);
 /// <param name="Patching">Update readings.</param>
 /// <param name="Accounts">Local account and password-policy readings.</param>
 /// <param name="Capacity">Disk capacity readings.</param>
+/// <param name="UpdaterVersion">
+/// The companion updater's version, or <c>null</c> when the agent could not read one — because no
+/// updater is installed, or because the binary would not execute. Both cases are worth knowing and
+/// neither is worth guessing at.
+/// </param>
+/// <param name="LastUpdateOutcome">
+/// The NAME of an <see cref="AgentUpdateOutcome"/> member, or <c>null</c> when nothing has been
+/// attempted on this machine. <b>Reported, never inferred</b> — a server watching only the agent
+/// version cannot tell "updated and rolled back" from "never attempted", because both leave the
+/// version unmoved, and a silent failed update is the worst thing auto-update can produce.
+/// </param>
 public sealed record AgentReportPayload(
     DateTimeOffset CollectedAt,
     string AgentVersion,
@@ -176,7 +236,9 @@ public sealed record AgentReportPayload(
     AgentHardeningReading? Hardening,
     AgentPatchingReading? Patching,
     AgentAccountsReading? Accounts,
-    AgentCapacityReading? Capacity);
+    AgentCapacityReading? Capacity,
+    string? UpdaterVersion = null,
+    string? LastUpdateOutcome = null);
 
 /// <summary>
 /// Operating-system readings.

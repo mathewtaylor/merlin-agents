@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Merlin.Agent.Core.Collection;
-using Merlin.Agent.Platform;
+using Merlin.Agent.Core.Platform;
 
 namespace Merlin.Agent.Collection;
 

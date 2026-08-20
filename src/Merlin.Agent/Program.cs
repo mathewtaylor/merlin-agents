@@ -1,10 +1,12 @@
 using System.Security.Cryptography;
 using Merlin.Agent.Collection;
+using Merlin.Agent.Core;
 using Merlin.Agent.Core.Collection;
 using Merlin.Agent.Core.Contracts;
-using Merlin.Agent.Crypto;
-using Merlin.Agent.Platform;
-using Merlin.Agent.State;
+using Merlin.Agent.Core.Crypto;
+using Merlin.Agent.Core.Platform;
+using Merlin.Agent.Core.State;
+using Merlin.Agent.Core.Update;
 using Merlin.Agent.Transport;
 
 namespace Merlin.Agent;
@@ -29,7 +31,15 @@ namespace Merlin.Agent;
 /// </remarks>
 public static class Program
 {
-    private const string Version = "0.2.0";
+    /// <summary>
+    /// This agent's version — the ONE constant, shared with the updater.
+    /// </summary>
+    /// <remarks>
+    /// Both binaries ship in the same archive at the same version, and the update mechanism
+    /// compares versions, so two constants free to drift would mean a component that believed it
+    /// was current while the other was not.
+    /// </remarks>
+    private const string Version = AgentVersionInfo.Current;
 
     /// <summary>Entry point.</summary>
     /// <param name="args">Command-line arguments.</param>
@@ -146,6 +156,23 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// Collects, reports, and then takes the agent's turn at replacing the UPDATER.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The report happens FIRST and the update work cannot stop it.</b> A failed update must
+    /// never leave a machine unable to report: silence in the fleet is indistinguishable from a
+    /// machine that was never enrolled, so the whole update turn sits behind the report and inside
+    /// a catch that swallows everything. The outcome it records is sent on the NEXT report, one run
+    /// later, which is the price of that ordering and worth paying.
+    /// </para>
+    /// <para>
+    /// <b>The machine-wide lock is taken for the whole run.</b> It is what stops the updater
+    /// swapping this binary while it is executing — and, held here rather than around the swap
+    /// alone, it also means the updater is never mid-swap when a collection starts.
+    /// </para>
+    /// </remarks>
     private static async Task<int> CollectAsync()
     {
         AgentStateData? state = AgentState.Read();
@@ -157,11 +184,42 @@ public static class Program
             return 1;
         }
 
+        // Not being able to take it means the updater is mid-run and may be replacing this very
+        // binary. Reporting anyway would be harmless; collecting into a directory being rewritten
+        // would not. The scheduler fires again in six hours.
+        using MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, TimeSpan.FromMinutes(2));
+
+        if (machineLock is null)
+        {
+            Console.Error.WriteLine(
+                "The updater is running. Nothing was collected; the agent will try again on its "
+                + "next scheduled run.");
+            return 0;
+        }
+
+        // Stamped before anything can fail, because this is the signal the UPDATER reads to decide
+        // whether a binary it swapped in actually runs. A stamp written only on success would have
+        // a network outage read as a broken agent and revert a working one.
+        state = state.WithLastRun(AgentComponent.Agent, DateTimeOffset.UtcNow)
+            .WithVersion(AgentComponent.Agent, Version);
+
+        AgentState.Write(state);
+
         (ECDsa key, _) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
 
         using (key)
         {
-            AgentReportPayload payload = Collect();
+            AgentReportPayload payload = Collect() with
+            {
+                // THE OUTCOME IS REPORTED, NEVER INFERRED. A server watching only the agent version
+                // cannot tell "updated and rolled back" from "never attempted" — both leave the
+                // version unmoved — and a silent failed update is the worst thing auto-update can
+                // produce.
+                UpdaterVersion = BinaryProbe.Default.Version(
+                    InstallLayout.Current.PathOf(AgentComponent.Updater)),
+                LastUpdateOutcome = state.LastUpdateOutcome?.ToString(),
+            };
 
             using ReportClient client = new(state.ServerUrl, key, Version);
 
@@ -171,14 +229,16 @@ public static class Program
 
             // The payload is persisted whether or not Merlin accepted it, so `status` can always
             // show the operator exactly what this machine tried to send.
-            AgentState.Write(state with
+            state = state with
             {
                 ClockOffsetSeconds = client.ClockOffsetSeconds == 0
                     ? state.ClockOffsetSeconds
                     : client.ClockOffsetSeconds,
                 LastReportAt = result.Succeeded ? DateTimeOffset.UtcNow : state.LastReportAt,
                 LastReportJson = json,
-            });
+            };
+
+            AgentState.Write(state);
 
             if (!result.Succeeded)
             {
@@ -187,7 +247,53 @@ public static class Program
             }
 
             Console.WriteLine(result.Detail);
+
+            await MaintainUpdaterAsync(state, key).ConfigureAwait(false);
+
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// The agent's half of mutual replacement: it looks after the UPDATER, and never itself.
+    /// </summary>
+    /// <remarks>
+    /// <b>Every failure here is swallowed.</b> The report has already been sent by the time this
+    /// runs; nothing it can do is worth failing a collection over, and an exception escaping would
+    /// give the scheduler a failed run for a machine that is perfectly healthy.
+    /// </remarks>
+    private static async Task MaintainUpdaterAsync(AgentStateData state, ECDsa key)
+    {
+        try
+        {
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+
+            using HttpClient http = new() { Timeout = TimeSpan.FromMinutes(10) };
+            using UpdateClient client = new(
+                state.ServerUrl, key, Version, state.ClockOffsetSeconds);
+
+            ComponentSwapper swapper = new(InstallLayout.Current, http, BinaryProbe.Default, Console.WriteLine);
+
+            UpdateRunner runner = new(
+                AgentComponent.Agent,
+                InstallLayout.Current,
+                swapper,
+                BinaryProbe.Default,
+                UpdateWindows.Default,
+                _ => { });
+
+            AgentStateData updated = await runner.RunAsync(
+                state,
+                token => client.CheckAsync(state.DeviceId, AgentRuntimeIdentifier.Current, now, token),
+                now).ConfigureAwait(false);
+
+            AgentState.Write(updated);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+            or CryptographicException or HttpRequestException or InvalidOperationException
+            or TaskCanceledException)
+        {
+            Console.Error.WriteLine($"  the updater check did not complete: {exception.Message}");
         }
     }
 
@@ -222,6 +328,13 @@ public static class Program
         Console.WriteLine($"Enrolled:    {state.EnrolledAt:yyyy-MM-dd HH:mm} UTC");
         Console.WriteLine($"Last report: {state.LastReportAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
         Console.WriteLine($"Agent:       {Version}");
+
+        // BOTH COMPONENTS, always. This machine carries two scheduled binaries that replace each
+        // other, and an operator shown only one of them cannot tell a fleet that updates itself
+        // from one that stopped a version ago — which is precisely the state a missing or stale
+        // updater leaves it in.
+        PrintUpdaterStatus(state);
+
         Console.WriteLine();
 
         if (args.Contains("--manifest", StringComparer.OrdinalIgnoreCase))
@@ -243,6 +356,38 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine("Run 'merlin-agent status --manifest' to see every query this agent runs.");
         return 0;
+    }
+
+    /// <summary>
+    /// Prints the companion updater's version and what the last swap on this machine did.
+    /// </summary>
+    /// <remarks>
+    /// <b>"not installed" and "would not run" are told apart</b>, because the remedies differ: the
+    /// first is a package built before auto-update shipped and is fixed by reinstalling, the second
+    /// is a broken binary that the agent itself will put back. Collapsing them into one line would
+    /// leave an operator guessing at which they are looking at.
+    /// </remarks>
+    private static void PrintUpdaterStatus(AgentStateData state)
+    {
+        string updaterPath = InstallLayout.Current.PathOf(AgentComponent.Updater);
+
+        string updater = !File.Exists(updaterPath)
+            ? "not installed — this machine will not update itself"
+            : BinaryProbe.Default.Version(updaterPath) ?? "installed, but it would not run";
+
+        Console.WriteLine($"Updater:     {updater}");
+        Console.WriteLine(
+            $"Last check:  {state.LastUpdaterRunAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
+
+        if (state.LastUpdateOutcome is { } outcome)
+        {
+            Console.WriteLine($"Last update: {outcome} at {state.LastUpdateAt:yyyy-MM-dd HH:mm} UTC");
+
+            if (state.LastUpdateDetail is { Length: > 0 } detail)
+            {
+                Console.WriteLine($"             {detail}");
+            }
+        }
     }
 
     private static int PrintManifest()

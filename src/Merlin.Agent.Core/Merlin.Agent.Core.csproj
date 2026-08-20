@@ -6,4 +6,13 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- DPAPI, for the software-key fallback on Windows machines with no usable TPM. It moved here
+         with the key store itself: the UPDATER needs the same device key as the agent, from the
+         same state directory, and a second enrolment or a second credential is exactly what this
+         design refuses. The package resolves on every target and throws only if called off
+         Windows, which the platform guard prevents. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
 </Project>
