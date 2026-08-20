@@ -303,6 +303,86 @@ public sealed class UpdateOrchestrationTests
     }
 
     /// <summary>
+    /// A run whose output was not read to the end is not a successful run.
+    /// </summary>
+    /// <remarks>
+    /// <b>"The command printed nothing" and "we gave up reading it" were the same value, and the
+    /// difference is a security control's state.</b> The drain is bounded, so a grandchild holding
+    /// the output pipe open leaves the text empty while the process itself exited zero. Every
+    /// caller then reads that empty string as a definite answer: <c>LinuxFirewall</c> asks whether
+    /// the output CONTAINS "Status: active", so an unread <c>ufw status</c> was reported to Merlin
+    /// as a firewall that is OFF — a confident, wrong fact about a machine, which is the one thing
+    /// the collection contract says never to produce. The rule belongs on the record rather than in
+    /// each caller, because there are three of them and they were written months apart.
+    /// </remarks>
+    [Fact]
+    public void ATruncatedReadIsNeverASuccessfulRun()
+    {
+        // Exited zero, read to the end, said nothing. That IS an observation of "nothing".
+        Assert.True(
+            new ProcessOutcome(true, true, 0, string.Empty, string.Empty, OutputComplete: true)
+                .Succeeded);
+
+        // Exited zero, and we never reached end-of-file. Indistinguishable from the line above by
+        // its text alone, and it must NOT be reported as a reading.
+        Assert.False(
+            new ProcessOutcome(true, true, 0, string.Empty, string.Empty, OutputComplete: false)
+                .Succeeded);
+
+        // A complete read of a non-zero exit is still not a success, and neither is a process that
+        // never exited — the flag narrows the rule, it does not replace it.
+        Assert.False(
+            new ProcessOutcome(true, true, 1, "text", string.Empty, OutputComplete: true).Succeeded);
+        Assert.False(
+            new ProcessOutcome(true, false, 0, "text", string.Empty, OutputComplete: true).Succeeded);
+    }
+
+    /// <summary>
+    /// A grandchild holding the output pipe open produces an incomplete read, not an empty one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The rule above is only worth having if <see cref="ProcessRunner"/> actually sets the
+    /// flag</b>, and this is the shape that sets it: a shell that exits immediately after
+    /// backgrounding a child which inherited its standard output. The process is gone, so
+    /// <c>WaitForExit</c> returns at once and the run looks entirely healthy — but the pipe has no
+    /// end-of-file until the grandchild lets go, which is exactly the case the bounded drain exists
+    /// for and exactly the case that used to be reported as success.
+    /// </para>
+    /// <para>
+    /// <b>Unix only, deliberately, on the precedent of the flooded-pipe test below.</b> Backgrounding
+    /// a process that keeps one inherited handle and drops the other is a shell-specific
+    /// incantation, and a quoting difference on Windows would turn a regression guard into a red
+    /// build for the wrong reason. The rule itself is asserted on every platform by the test above.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void AGrandchildHoldingTheOutputPipeYieldsAnIncompleteRead()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // `sleep` inherits stdout — the pipe — and sends its own stderr to /dev/null, so standard
+        // error reaches end-of-file at once and only the OUTPUT drain times out. The shell itself
+        // exits the moment it has echoed.
+        ProcessOutcome outcome = ProcessRunner.Run(
+            "/bin/sh",
+            ["-c", "sleep 8 2>/dev/null & echo hello"],
+            TimeSpan.FromSeconds(10));
+
+        // It started and exited cleanly. Everything the old rule looked at says "success".
+        Assert.True(outcome.Started);
+        Assert.True(outcome.Exited);
+        Assert.Equal(0, outcome.ExitCode);
+
+        // And yet the output was never read to the end, so it is not a reading.
+        Assert.False(outcome.OutputComplete);
+        Assert.False(outcome.Succeeded);
+    }
+
+    /// <summary>
     /// A child that floods one pipe cannot wedge the shared process runner.
     /// </summary>
     /// <remarks>

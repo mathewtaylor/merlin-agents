@@ -116,7 +116,14 @@ public static class Program
             AgentComponent.Updater,
             InstallLayout.Current,
             () => new DeviceUpdateSession(),
-            swapLog: log,
+
+            // A SWAP IS WORTH A LINE EVEN ON AN UNATTENDED RUN, and the turn's own commentary is
+            // not. The agent has always said so in its own wiring; this binary passed the quiet
+            // logger to both, which silenced the swap that matters MORE — the updater replacing
+            // the agent is the common direction and the higher-consequence one, and a scheduled
+            // run is exactly when nobody is watching and the scheduler's log is all an operator
+            // has afterwards.
+            swapLog: Console.WriteLine,
             decisionLog: log,
             minimumInterval: _minimumInterval);
 

@@ -80,16 +80,51 @@ public static class Program
                 _ => PrintUsage(),
             };
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-            or CryptographicException or HttpRequestException or TaskCanceledException)
+        // UNFILTERED, DELIBERATELY — the same rule the updater's Main states, and it was reached
+        // there by the same route: a named list reads as the more careful choice and is the weaker
+        // one. This list had already grown twice, each time after a type walked past it and ended a
+        // scheduled run in a stack trace nobody reads, and it was still short. UriFormatException
+        // is the reachable one: a hand-edited or migrated state.json with a malformed ServerUrl
+        // throws it out of ReportClient's constructor, inside the collection — which sits OUTSIDE
+        // UpdateTurn's own fault boundary by design, so nothing below catches it.
+        //
+        // UpdateTurn already contains whatever escapes the update work and reports it as a fault.
+        // This catch is what stops everything AROUND that — reading the state, taking the lock,
+        // opening the device key, the collection itself — costing the operator a stack trace
+        // instead of a sentence and an exit code.
+#pragma warning disable CA1031
+        catch (Exception exception)
+#pragma warning restore CA1031
         {
-            // Expected operational failures: no network, no permission, no TPM. Reported plainly and
-            // with a non-zero exit code so the scheduler's history shows the failure, rather than a
-            // stack trace nobody will read. TaskCanceledException is in the list because that is
-            // what an HttpClient timeout raises — a server that HANGS is as ordinary as one that
-            // refuses, and without it enrol, set-server and rotate-key died with a stack trace.
             Console.Error.WriteLine($"merlin-agent: {exception.Message}");
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Says so, loudly, when a deployment address is plaintext.
+    /// </summary>
+    /// <remarks>
+    /// <b>Plaintext is permitted because a deployment behind a private ingress or on a developer's
+    /// machine is a real case — but it is not free, and it used to be silent.</b> The update-check
+    /// RESPONSE is not signed: only the request is. So TLS is the only thing standing between an
+    /// on-path attacker and the version, address and digest this machine is told to move to. The
+    /// compile-time host allowlist still confines the download to the GitHub release hosts, so the
+    /// worst case is being pinned to a different genuine release rather than to an attacker's
+    /// build — bounded, and not nothing. <c>PackageHosts</c> refuses plaintext outright for exactly
+    /// this reason; this address cannot be refused without breaking those deployments, so it warns.
+    /// </remarks>
+    /// <param name="server">The address as given.</param>
+    private static void WarnIfPlaintext(string server)
+    {
+        if (Uri.TryCreate(server, UriKind.Absolute, out Uri? parsed)
+            && parsed.Scheme == Uri.UriSchemeHttp)
+        {
+            Console.Error.WriteLine(
+                $"Warning: {server} is plaintext http. Reports and the update check are not "
+                + "protected in transit, and the update answer — the version and hash this machine "
+                + "is told to install — is not signed, so anyone on the path can change it. Use "
+                + "https unless this is a test deployment.");
         }
     }
 
@@ -118,6 +153,8 @@ public static class Program
                 "Usage: merlin-agent enrol --server <url> --enrolment-key <key>");
             return 1;
         }
+
+        WarnIfPlaintext(server);
 
         (ECDsa key, KeyAttestation attestation) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
 
@@ -260,7 +297,12 @@ public static class Program
                     LastUpdateOutcome = state.LastUpdateOutcome?.ToString(),
                 };
 
-                using ReportClient client = new(state.ServerUrl, key, Version);
+                // SEEDED WITH THE STORED OFFSET, and handed a RAW instant below. Pre-applying it
+                // here as well made the client learn a RESIDUAL, which was then persisted into a
+                // field every other reader treats as absolute — see ReportClient's remarks for why
+                // that never converges.
+                using ReportClient client = new(
+                    state.ServerUrl, key, Version, state.ClockOffsetSeconds);
 
                 // THE ATTEMPT IS TOTAL, so the update turn that follows is reached whatever the
                 // network did. ReportAsync reports an unreachable Merlin as a failed report rather
@@ -270,10 +312,7 @@ public static class Program
                 // so the JSON it built still comes back with it; catching here left `status`
                 // showing the previous payload.
                 (TransportResult result, string json) = await client
-                    .ReportAsync(
-                        payload,
-                        state.DeviceId,
-                        DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
+                    .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow)
                     .ConfigureAwait(false);
 
                 report = result;
@@ -282,9 +321,11 @@ public static class Program
                 // always show the operator exactly what this machine tried to send.
                 return state with
                 {
-                    ClockOffsetSeconds = client.ClockOffsetSeconds == 0
-                        ? state.ClockOffsetSeconds
-                        : client.ClockOffsetSeconds,
+                    // Written back unconditionally: the client STARTS at the stored value, so an
+                    // untouched offset writes itself and a relearned one replaces it. The old
+                    // "zero means it learned nothing" test existed only because the client used to
+                    // start at zero, and it is wrong once the client is seeded.
+                    ClockOffsetSeconds = client.ClockOffsetSeconds,
                     LastReportAt = result.Succeeded ? DateTimeOffset.UtcNow : state.LastReportAt,
                     LastReportJson = json,
                 };
@@ -346,6 +387,17 @@ public static class Program
                     + "the new binary runs on the next scheduled collection.");
                 return 0;
 
+            case UpdateTurnStatus.TooSoon:
+
+                // Unreachable while the agent passes no minimum interval, and handled anyway. It
+                // is a live enum member that the updater already answers explicitly, and left to
+                // the arm below it would have taken the ONE path there that assumes the collection
+                // ran — printing "Report refused:" with an empty detail and exiting 1, which is a
+                // healthy machine reported as a failed run on every gated fire. That is the same
+                // shape as the rights-failure-reported-as-contention defect, arriving by a
+                // different door.
+                return 0;
+
             default:
 
                 // BEFORE THE REPORT'S OWN EXIT CODE, because that is the order the two lines were
@@ -356,9 +408,19 @@ public static class Program
                     Console.Error.WriteLine($"  the updater check did not complete: {fault}");
                 }
 
-                if (report is not { Succeeded: true })
+                // NO REPORT AT ALL IS NOT A REFUSED REPORT. Every status that stops the turn before
+                // the collection is answered above, so reaching here with nothing recorded would
+                // mean a status added later fell through — and reporting that as a refusal names a
+                // failure that did not happen. Say nothing and exit clean; the arm above is where a
+                // new member belongs.
+                if (report is null)
                 {
-                    Console.Error.WriteLine($"Report refused: {report?.Detail}");
+                    return 0;
+                }
+
+                if (!report.Succeeded)
+                {
+                    Console.Error.WriteLine($"Report refused: {report.Detail}");
                     return 1;
                 }
 
@@ -383,7 +445,24 @@ public static class Program
 
         if (state is null)
         {
-            Console.WriteLine("This machine has not enrolled.");
+            // A RIGHTS FAILURE IS NOT AN ABSENCE, and reporting it as one is how this command
+            // became misleading to the very person it was written for. The state directory is
+            // 0700 and root-owned on macOS and Linux, so an ordinary user cannot traverse it:
+            // File.Exists answers false, the read returns null, and the honest answer — "you
+            // cannot see it from here" — came out as "there is nothing here". An employee running
+            // this to check what their machine sends was told the agent was not enrolled while it
+            // was reporting perfectly well.
+            Console.WriteLine(
+                StateDirectoryIsUnreadable()
+                    ? "The state directory exists but cannot be read from this account. Run this "
+                        + "as root (or as Administrator on Windows): it is restricted to the "
+                        + "superuser because the device key lives beside the state file."
+                    : "This machine has not enrolled.");
+
+            // BOTH COMPONENTS, even here. "Not enrolled" and "the updater was never installed" are
+            // different faults with different fixes, and a machine that is silent is exactly when
+            // an operator needs to tell them apart.
+            PrintComponents();
 
             // The manifest is still worth printing: somebody deciding whether to ALLOW the agent
             // onto their machine is exactly the person who should be able to read what it would
@@ -398,7 +477,6 @@ public static class Program
         Console.WriteLine($"Reports to:  {state.ServerUrl}");
         Console.WriteLine($"Enrolled:    {state.EnrolledAt:yyyy-MM-dd HH:mm} UTC");
         Console.WriteLine($"Last report: {state.LastReportAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
-        Console.WriteLine($"Agent:       {Version}");
 
         // BOTH COMPONENTS, always. This machine carries two scheduled binaries that replace each
         // other, and an operator shown only one of them cannot tell a fleet that updates itself
@@ -438,7 +516,50 @@ public static class Program
     /// is a broken binary that the agent itself will put back. Collapsing them into one line would
     /// leave an operator guessing at which they are looking at.
     /// </remarks>
-    private static void PrintUpdaterStatus(AgentStateData state)
+    /// <summary>
+    /// Whether the state directory is there but shut to this account.
+    /// </summary>
+    /// <remarks>
+    /// <b>Asked by TRYING, not by testing the directory's existence.</b> A directory that exists
+    /// and is readable and simply holds no state file is a machine that has not enrolled, and
+    /// saying "run as root" to that person sends them after a permission problem they do not have.
+    /// Only an enumeration that is actually refused distinguishes the two.
+    /// </remarks>
+    /// <returns><c>true</c> when the directory exists and this account cannot read it.</returns>
+    private static bool StateDirectoryIsUnreadable()
+    {
+        if (!Directory.Exists(AgentState.Directory))
+        {
+            return false;
+        }
+
+        try
+        {
+            // EAGER, and the result deliberately discarded. The refusal only surfaces when
+            // something actually reads the directory, so a lazy enumerator that is never walked
+            // would answer "readable" for a directory nobody can open.
+            _ = Directory.GetFileSystemEntries(AgentState.Directory);
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Names both installed components, with or without a state file.</summary>
+    /// <remarks>
+    /// <b>Which binaries are on this machine is a fact about the DISK, not about enrolment</b> —
+    /// and the two questions an operator brings to a machine that is not reporting are "is it
+    /// enrolled" and "did the updater ever get installed". Printing the components only after the
+    /// state file was read answered the second only when the first was already fine, which is the
+    /// case where nobody needed to ask.
+    /// </remarks>
+    private static void PrintComponents()
     {
         string updaterPath = InstallLayout.Current.PathOf(AgentComponent.Updater);
 
@@ -446,7 +567,13 @@ public static class Program
             ? "not installed — this machine will not update itself"
             : BinaryProbe.Default.Version(updaterPath) ?? "installed, but it would not run";
 
+        Console.WriteLine($"Agent:       {Version}");
         Console.WriteLine($"Updater:     {updater}");
+    }
+
+    private static void PrintUpdaterStatus(AgentStateData state)
+    {
+        PrintComponents();
         Console.WriteLine(
             $"Last check:  {state.LastUpdaterRunAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
 
@@ -565,6 +692,8 @@ public static class Program
             return 1;
         }
 
+        WarnIfPlaintext(server);
+
         if (string.Equals(server.TrimEnd('/'), state.ServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine($"Already reporting to {state.ServerUrl}.");
@@ -676,10 +805,11 @@ public static class Program
                 Convert.ToBase64String(incoming.ExportSubjectPublicKeyInfo()),
                 KeyAttestation.Software.ToString());
 
-            using ReportClient client = new(state.ServerUrl, outgoing, Version);
+            using ReportClient client = new(
+                state.ServerUrl, outgoing, Version, state.ClockOffsetSeconds);
 
             TransportResult result = await client
-                .RotateAsync(request, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
+                .RotateAsync(request, state.DeviceId, DateTimeOffset.UtcNow)
                 .ConfigureAwait(false);
 
             if (!result.Succeeded)

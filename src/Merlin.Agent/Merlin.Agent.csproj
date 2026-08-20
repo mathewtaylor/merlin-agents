@@ -23,13 +23,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- DPAPI, for the software-key fallback on Windows machines with no usable TPM. Not in the
-         shared framework; the package is AOT-compatible. It resolves on every target and throws
-         only if called off Windows, which the platform guard prevents. -->
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
     <!-- EVERY pack travels with EVERY build, not just the matching one. The manifest option on
          `merlin-agent status` is what an employee runs to see what the agent reads, and a package
          carrying only its own platform's manifest could not answer that question about the fleet

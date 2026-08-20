@@ -102,11 +102,18 @@ merlin-agent status --manifest       # every query this agent runs
 merlin-agent set-server --server <url>
 merlin-agent rotate-key
 merlin-agent uninstall
+merlin-agent --version               # the version string; also how the other component probes it
 
-merlin-updater run                   # what the daily scheduled job runs
-merlin-updater run --now             # check immediately and say what happened
+merlin-updater run                   # what the daily scheduled job runs; no-ops within 1 h of the last
+merlin-updater run --now             # check immediately, bypassing that hour, and say what happened
 merlin-updater status                # both components' versions and the last outcome
+merlin-updater --version             # as above
 ```
+
+`--version` is not cosmetic. Before either component commits a swap it EXECUTES the staged binary
+with exactly this flag and reads the first line back — that is what catches an antivirus
+quarantine, a wrong architecture or a missing dependency while the working binary is still in
+place. Changing what it prints changes what the update mechanism believes is installed.
 
 ## How it works
 
@@ -133,7 +140,7 @@ signal that cannot be read is reported as *not observed*, which Merlin will not 
 | | |
 |---|---|
 | Idle footprint | 0 MB, 0% CPU — no resident process |
-| Active | ~2–3 s every 6 hours, plus a daily update check |
+| Active | ~2–3 s every 6 hours; each collection also takes an update turn, and the updater takes one daily |
 | Install size | ~12 MB agent + ~7 MB updater + osquery |
 | Platforms | Windows (Home, Pro, Enterprise, Server), macOS (Apple silicon), Linux |
 | Architectures | `win-x64`, `osx-arm64`, `linux-x64`, `linux-arm64` |

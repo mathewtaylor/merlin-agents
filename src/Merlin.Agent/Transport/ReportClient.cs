@@ -30,6 +30,22 @@ public sealed record TransportResult(bool Succeeded, string Detail, DateTimeOffs
 /// turns "this laptop can never report" into a self-healing hiccup. The offset is persisted so the
 /// next run starts correct.
 /// </para>
+/// <para>
+/// <b>THE OFFSET IS ABSOLUTE, AND THE CALLER MUST HAND OVER A RAW INSTANT.</b> This client applies
+/// <see cref="ClockOffsetSeconds"/> itself, so <c>now</c> is this machine's uncorrected clock and
+/// what comes back out is the correction to store. A caller that pre-applies the stored offset AND
+/// lets the client learn gets a <b>residual</b> — how wrong the already-corrected time still is —
+/// which is right for the retry in flight and wrong the moment it is persisted, because every
+/// reader treats the stored field as absolute.
+/// <para>
+/// It does not fail loudly. With <c>A</c> the true offset and <c>s</c> the stored one, persisting
+/// the residual gives <c>s' = A - s</c>: a two-cycle that never converges, so a drifting machine
+/// alternates between two wrong offsets for ever, paying a refusal and a retry on every single
+/// run. It hid because the FIRST correction is taken against a raw instant and is therefore
+/// genuinely absolute, so a freshly enrolled machine looks perfect. <c>UpdateClient</c> has always
+/// worked this way; this client is the one that did not.
+/// </para>
+/// </para>
 /// </remarks>
 public sealed class ReportClient : IDisposable
 {
@@ -47,7 +63,12 @@ public sealed class ReportClient : IDisposable
     /// <param name="serverUrl">The Merlin deployment's base address.</param>
     /// <param name="key">The device signing key.</param>
     /// <param name="agentVersion">This agent's version.</param>
-    public ReportClient(string serverUrl, ECDsa key, string agentVersion)
+    /// <param name="clockOffsetSeconds">
+    /// The correction this machine already knows it needs, from a previous run. Pass it and hand
+    /// <c>now</c> over raw; do not pre-apply it. Zero for enrolment and for a move to a different
+    /// deployment, which has its own clock and must be learned from scratch.
+    /// </param>
+    public ReportClient(string serverUrl, ECDsa key, string agentVersion, long clockOffsetSeconds = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(serverUrl);
 
@@ -55,6 +76,15 @@ public sealed class ReportClient : IDisposable
         {
             BaseAddress = new Uri(serverUrl.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = TimeSpan.FromSeconds(60),
+
+            // BOUNDED, BECAUSE THIS BODY IS NEITHER ALLOWLISTED NOR HASH-PINNED. The package
+            // download has both and is streamed against a running total; this one comes from
+            // whatever address the state file names, is buffered whole by default, and is read
+            // into a string — two bytes of memory per byte on the wire — inside a process running
+            // as SYSTEM or root. Every answer this endpoint gives is a few hundred bytes.
+            // Exceeding it raises HttpRequestException, which the callers already treat as a
+            // refused request, so it adds no new failure mode.
+            MaxResponseContentBufferSize = 64 * 1024,
         };
 
         _http.DefaultRequestHeaders.UserAgent.Add(
@@ -62,9 +92,13 @@ public sealed class ReportClient : IDisposable
 
         _key = key;
         _agentVersion = agentVersion;
+        ClockOffsetSeconds = clockOffsetSeconds;
     }
 
-    /// <summary>The clock offset, in seconds, learned from a refused request.</summary>
+    /// <summary>
+    /// The ABSOLUTE correction to add to this machine's clock, in seconds — as supplied, or as
+    /// relearned from a refusal. This is the value to persist.
+    /// </summary>
     public long ClockOffsetSeconds { get; private set; }
 
     /// <summary>Enrols this machine.</summary>
@@ -97,7 +131,7 @@ public sealed class ReportClient : IDisposable
                     : (new TransportResult(true, $"Enrolled as {enrolled.DeviceCode}.", enrolled.ServerTime), enrolled);
             }
 
-            if (TryLearnOffset(response.StatusCode, content, ref now, attempt))
+            if (TryLearnOffset(response.StatusCode, content, now, attempt))
             {
                 continue;
             }
@@ -154,7 +188,7 @@ public sealed class ReportClient : IDisposable
                     return (new TransportResult(true, "Report accepted.", null), json);
                 }
 
-                if (TryLearnOffset(response.StatusCode, content, ref now, attempt))
+                if (TryLearnOffset(response.StatusCode, content, now, attempt))
                 {
                     continue;
                 }
@@ -228,7 +262,7 @@ public sealed class ReportClient : IDisposable
     private bool TryLearnOffset(
         HttpStatusCode statusCode,
         string content,
-        ref DateTimeOffset now,
+        DateTimeOffset now,
         int attempt)
     {
         if (attempt > 0 || statusCode != HttpStatusCode.BadRequest)
@@ -252,6 +286,9 @@ public sealed class ReportClient : IDisposable
             return false;
         }
 
+        // ABSOLUTE, BECAUSE `now` IS RAW. See the class remarks: the caller hands over this
+        // machine's uncorrected clock and Build applies the offset, so the difference measured here
+        // is the whole correction rather than what is left of it.
         DateTimeOffset serverTime = DateTimeOffset.FromUnixTimeSeconds(refusal.ServerTime);
         long offset = (long)(serverTime - now).TotalSeconds;
 

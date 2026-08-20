@@ -452,9 +452,14 @@ public sealed class ComponentSwapper
         // A redirect off the allowlist is a redirect off the allowlist. HttpClient follows them by
         // default, so the final address is re-checked — github.com hands every download to
         // objects.githubusercontent.com, and both are on the list precisely because of it.
+        // FAILS CLOSED. An address we cannot read is not an address we have checked, and this is
+        // the last gate in front of executing whatever arrives — so "no final address" must refuse
+        // rather than fall through. HttpClient always populates these in practice, but the
+        // transport is an injectable seam, and a supply-chain control that a null silently skips is
+        // not a control.
         string? finalAddress = response.RequestMessage?.RequestUri?.ToString();
 
-        if (finalAddress is not null && !PackageHosts.IsAllowed(finalAddress))
+        if (!PackageHosts.IsAllowed(finalAddress))
         {
             return PackageHosts.Refusal(finalAddress);
         }
@@ -559,8 +564,10 @@ public sealed class ComponentSwapper
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            // A staging directory left behind is untidy, never harmful — it sits under the state
-            // directory and the next run writes its own.
+            // A staging directory left behind is untidy, never harmful — the next swap prunes the
+            // whole tree before it stages anything. It sits under the INSTALL directory, not the
+            // state directory: a file about to become an installed binary has to be staged
+            // somewhere exactly as protected as the binaries themselves.
         }
     }
 }

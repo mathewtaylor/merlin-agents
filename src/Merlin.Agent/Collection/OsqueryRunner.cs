@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Merlin.Agent.Core.Collection;
@@ -33,14 +32,25 @@ public sealed class OsqueryRunner
 
     private readonly string _osqueryPath;
     private readonly TimeSpan _timeout;
+    private readonly TimeSpan _budget;
 
     /// <summary>Initialises a new instance of the <see cref="OsqueryRunner"/> class.</summary>
     /// <param name="osqueryPath">Full path to <c>osqueryi.exe</c>.</param>
     /// <param name="timeout">How long a single query may take.</param>
-    public OsqueryRunner(string osqueryPath, TimeSpan timeout)
+    /// <param name="budget">
+    /// How long the WHOLE pack may take. <b>A per-query timeout does not bound a collection</b> —
+    /// the Windows pack holds sixteen queries, so a machine whose osquery hangs on every one of
+    /// them multiplied a thirty-second timeout into minutes, all of it while holding the
+    /// machine-wide lock. The updater waits two minutes for that lock and then reports contention,
+    /// so a sick osquery quietly starved the one component able to put a broken agent back. Ninety
+    /// seconds sits comfortably inside that wait; a collection that cannot finish in it has
+    /// nothing useful left to say.
+    /// </param>
+    public OsqueryRunner(string osqueryPath, TimeSpan timeout, TimeSpan? budget = null)
     {
         _osqueryPath = osqueryPath;
         _timeout = timeout;
+        _budget = budget ?? TimeSpan.FromSeconds(90);
     }
 
     /// <summary>
@@ -124,8 +134,22 @@ public sealed class OsqueryRunner
 
         OsqueryResults results = new();
 
+        // MONOTONIC, not wall clock. A machine coming back from sleep is exactly when a scheduled
+        // collection fires and exactly when DateTime.UtcNow can step, and a budget that a clock
+        // correction can extend is not a budget.
+        long deadline = Environment.TickCount64 + (long)_budget.TotalMilliseconds;
+
         foreach ((string name, string sql) in queries)
         {
+            if (Environment.TickCount64 >= deadline)
+            {
+                // NOT OBSERVED, never a false reading — the same answer a missing table gives, and
+                // the normaliser already turns it into a null rather than a negative. Reported per
+                // query so the operator sees which readings were skipped and why.
+                onQueryFailed?.Invoke(name, "the collection budget was exhausted before this query ran");
+                continue;
+            }
+
             (string? output, string? error) = Execute("--json", sql);
 
             if (output is null)

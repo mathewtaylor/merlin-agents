@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace Merlin.Agent.Core.Update;
 
 /// <summary>
@@ -53,11 +55,18 @@ public static class PackageHosts
     /// untrue.
     /// </para>
     /// </remarks>
-    public static IReadOnlyList<string> Allowed { get; } =
-    [
+    /// <remarks>
+    /// <b>A <see cref="FrozenSet{T}"/> because the collection expression behind an
+    /// <c>IReadOnlyList</c> is a plain array</b>, which anything in the process can cast back and
+    /// write to — and this XML doc says the list cannot be moved. Code already running in this
+    /// process has won regardless, but a control documented as unassailable should not have a
+    /// one-line bypass sitting behind an interface. It also carries the comparer, so a caller
+    /// cannot compare case-sensitively by forgetting to pass one.
+    /// </remarks>
+    public static FrozenSet<string> Allowed { get; } = FrozenSet.Create(
+        StringComparer.OrdinalIgnoreCase,
         "github.com",
-        "objects.githubusercontent.com",
-    ];
+        "objects.githubusercontent.com");
 
     /// <summary>
     /// Whether an address may be downloaded from.
@@ -78,7 +87,7 @@ public static class PackageHosts
         }
 
         return parsed.Scheme == Uri.UriSchemeHttps
-            && Allowed.Contains(parsed.Host, StringComparer.OrdinalIgnoreCase);
+            && Allowed.Contains(parsed.Host);
     }
 
     /// <summary>A sentence naming why an address was refused, for the console and the log.</summary>

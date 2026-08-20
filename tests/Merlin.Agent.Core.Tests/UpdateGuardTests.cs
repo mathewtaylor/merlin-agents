@@ -3,6 +3,7 @@ using Merlin.Agent.Core;
 using Merlin.Agent.Core.Crypto;
 using Merlin.Agent.Core.State;
 using Merlin.Agent.Core.Update;
+using System.IO.Compression;
 using Xunit;
 
 namespace Merlin.Agent.Core.Tests;
@@ -324,5 +325,93 @@ public sealed class UpdateStateTests
     {
         Assert.Equal(AgentComponent.Updater, InstallLayout.Target(AgentComponent.Agent));
         Assert.Equal(AgentComponent.Agent, InstallLayout.Target(AgentComponent.Updater));
+    }
+}
+
+/// <summary>
+/// The bounds on what an archive may expand to.
+/// </summary>
+/// <remarks>
+/// <b>The swapper's 256 MB cap bounds the COMPRESSED download and says nothing about the result.</b>
+/// A compressed stream may declare very little and produce a great deal, so every check upstream —
+/// the host allowlist, the SHA-256 pin, the size cap — can pass while the extraction itself fills
+/// the disk, as SYSTEM or root, inside the install tree, on a machine whose whole job is to keep
+/// reporting. These stand BEHIND the hash pin, which is what makes them defence in depth rather
+/// than the control.
+/// </remarks>
+public sealed class PackageArchiveBoundsTests
+{
+    /// <summary>
+    /// An archive of thousands of entries is refused rather than walked.
+    /// </summary>
+    /// <remarks>
+    /// A real package carries two binaries and a handful of manifests. Empty entries cost almost
+    /// nothing to compress, so the download cap does not bound how many of them arrive.
+    /// </remarks>
+    [Fact]
+    public void AnArchiveWithAbsurdlyManyEntriesIsRefused()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "merlin-archive-bounds", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            string archivePath = Path.Combine(root, "package.zip");
+
+            using (FileStream file = File.Create(archivePath))
+            using (ZipArchive archive = new(file, ZipArchiveMode.Create))
+            {
+                // Every one of them a miss, so the walk never short-circuits on a match.
+                for (int index = 0; index < 600; index++)
+                {
+                    archive.CreateEntry($"filler-{index}.txt");
+                }
+            }
+
+            // InvalidDataException is what a corrupt archive already raises here, and the swapper
+            // already turns it into a reported Failed outcome — so the bound needs no new case.
+            Assert.Throws<InvalidDataException>(
+                () => PackageArchive.TryExtract(
+                    archivePath, "merlin-agent", Path.Combine(root, "out")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// An ordinary package still extracts, from both archive formats.
+    /// </summary>
+    /// <remarks>
+    /// The bound is applied by rewriting the extraction rather than by inspecting a declared
+    /// length, so this is what proves the rewrite still does the job it was already doing.
+    /// </remarks>
+    [Fact]
+    public void AnOrdinaryPackageStillExtractsFromBothFormats()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "merlin-archive-bounds", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            string tar = Path.Combine(root, "package.tar.gz");
+            string zip = Path.Combine(root, "package.zip");
+            string fromTar = Path.Combine(root, "from-tar");
+            string fromZip = Path.Combine(root, "from-zip");
+
+            File.WriteAllBytes(tar, UpdateTestKit.BuildArchive("the agent", "the updater"));
+            File.WriteAllBytes(zip, UpdateTestKit.BuildZipArchive("the agent", "the updater"));
+
+            Assert.True(PackageArchive.TryExtract(tar, InstallLayout.FileName(AgentComponent.Agent), fromTar));
+            Assert.True(PackageArchive.TryExtract(zip, InstallLayout.FileName(AgentComponent.Updater), fromZip));
+
+            Assert.Equal("the agent", File.ReadAllText(fromTar));
+            Assert.Equal("the updater", File.ReadAllText(fromZip));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 }

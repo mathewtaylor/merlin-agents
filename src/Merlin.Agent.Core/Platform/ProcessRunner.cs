@@ -8,15 +8,34 @@ namespace Merlin.Agent.Core.Platform;
 /// <param name="ExitCode">Its exit code, when it exited.</param>
 /// <param name="StandardOutput">Everything it wrote to standard output.</param>
 /// <param name="StandardError">Everything it wrote to standard error, or why it did not run.</param>
+/// <param name="OutputComplete">
+/// Whether standard output was read all the way to end-of-file.
+/// <b>A truncated read must never be reported as a successful one.</b> The drain is bounded, so a
+/// grandchild holding the pipe open leaves <see cref="StandardOutput"/> empty while the process
+/// itself exited zero — and without this flag that is indistinguishable from a command that
+/// printed nothing. It is not a theoretical difference: the firewall readings ask whether the
+/// output CONTAINS a word, so an empty string is read as a definite "no", and the agent asserts
+/// that a protection is OFF on a machine where it was merely never observed. Every caller's
+/// contract is the opposite — a reading that could not be taken is <c>null</c>, which Merlin reads
+/// as not observed.
+/// <para>
+/// Standard error is deliberately NOT part of this. It carries diagnostics, never a decision, and
+/// a daemonising grandchild that holds only the error pipe open would otherwise blank a perfectly
+/// good reading.
+/// </para>
+/// </param>
 public sealed record ProcessOutcome(
     bool Started,
     bool Exited,
     int ExitCode,
     string StandardOutput,
-    string StandardError)
+    string StandardError,
+    bool OutputComplete)
 {
-    /// <summary>Whether the process started, exited within its timeout, and exited zero.</summary>
-    public bool Succeeded => Started && Exited && ExitCode == 0;
+    /// <summary>
+    /// Whether the process started, exited within its timeout, exited zero, and was read to the end.
+    /// </summary>
+    public bool Succeeded => Started && Exited && ExitCode == 0 && OutputComplete;
 }
 
 /// <summary>
@@ -129,7 +148,8 @@ public static class ProcessRunner
 
             if (process is null)
             {
-                return new ProcessOutcome(false, false, 0, string.Empty, "The process could not be started.");
+                return new ProcessOutcome(
+                    false, false, 0, string.Empty, "The process could not be started.", false);
             }
 
             // Started before the wait, so neither pipe can fill and block the child. See the class
@@ -146,18 +166,22 @@ public static class ProcessRunner
                 Drain(reading);
                 Drain(failing);
 
-                return new ProcessOutcome(true, false, 0, string.Empty, "It did not exit within the timeout.");
+                return new ProcessOutcome(
+                    true, false, 0, string.Empty, "It did not exit within the timeout.", false);
             }
 
-            return new ProcessOutcome(
-                true, true, process.ExitCode, Drain(reading), Drain(failing));
+            (bool complete, string output) = Drain(reading);
+            (_, string error) = Drain(failing);
+
+            return new ProcessOutcome(true, true, process.ExitCode, output, error, complete);
         }
         catch (Exception exception) when (exception is System.ComponentModel.Win32Exception
-            or InvalidOperationException or IOException or UnauthorizedAccessException)
+            or InvalidOperationException or IOException or UnauthorizedAccessException
+            or AggregateException)
         {
             // The binary is not installed on this machine, or cannot be executed. The ordinary case
             // for a firewall front-end this distribution does not use.
-            return new ProcessOutcome(false, false, 0, string.Empty, exception.Message);
+            return new ProcessOutcome(false, false, 0, string.Empty, exception.Message, false);
         }
     }
 
@@ -169,9 +193,18 @@ public static class ProcessRunner
             process.Kill(entireProcessTree: true);
         }
         catch (Exception exception) when (exception is InvalidOperationException
-            or System.ComponentModel.Win32Exception or NotSupportedException)
+            or System.ComponentModel.Win32Exception or NotSupportedException
+            or AggregateException)
         {
             // Already gone, or the platform refused. The verdict is unchanged either way.
+            //
+            // AGGREGATEEXCEPTION IS THE ONE THAT IS NOT OBVIOUS, and leaving it out cost the whole
+            // collection. Kill(entireProcessTree: true) walks the tree and collects the failures it
+            // could not kill into an AggregateException — so ONE un-killable grandchild threw out
+            // of here, skipped both drains below, unwound through the collection (which sits
+            // outside UpdateTurn's fault boundary) and past Main's own filter, ending a scheduled
+            // run in a stack trace. A process we merely failed to kill is not worth any of that:
+            // it already outstayed its timeout and the verdict is already decided.
         }
     }
 
@@ -179,19 +212,46 @@ public static class ProcessRunner
     /// Collects what a pipe carried, waiting only <see cref="_drainGrace"/> for it.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Never throws and never waits indefinitely.</b> A read that faulted when the process was
     /// killed, or that is still blocked on a handle a grandchild holds open, contributes no output
     /// — which is the honest answer, and strictly better than the caller hanging on it.
+    /// </para>
+    /// <para>
+    /// <b>It reports WHETHER it got to the end, and the caller must carry that.</b> Returning the
+    /// empty string alone made "the command printed nothing" and "we gave up reading it" the same
+    /// value, which is how a bounded read turned into a false assertion about a security control.
+    /// See <see cref="ProcessOutcome.OutputComplete"/>.
+    /// </para>
     /// </remarks>
-    private static string Drain(Task<string> read)
+    /// <param name="read">The in-flight read of one pipe.</param>
+    /// <returns>Whether the pipe reached end-of-file, and what it carried.</returns>
+    private static (bool Complete, string Text) Drain(Task<string> read)
     {
         try
         {
-            return read.Wait(_drainGrace) ? read.Result : string.Empty;
+            if (read.Wait(_drainGrace))
+            {
+                return (true, read.Result);
+            }
         }
         catch (AggregateException)
         {
-            return string.Empty;
+            // The read faulted — most often because killing the process disposed the pipe under
+            // it. There is no output to report and no end-of-file was reached.
+            return (false, string.Empty);
         }
+
+        // ABANDONED, SO OBSERVE IT. The task outlives this call and the process object is disposed
+        // on the way out, so the read can fault afterwards with nobody watching. Left unobserved it
+        // is an unhandled-exception surface for any host that opts into that behaviour, and it
+        // costs one continuation to close.
+        _ = read.ContinueWith(
+            static faulted => _ = faulted.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return (false, string.Empty);
     }
 }

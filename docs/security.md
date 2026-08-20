@@ -192,13 +192,19 @@ reason.
 ## 6. What the agent can reach
 
 The agent runs with administrative rights — SYSTEM on Windows, root on macOS and Linux — which is
-what reading disk-encryption state and the local security policy requires. It makes outbound HTTPS
+what reading disk-encryption state and the local security policy requires. It makes outbound
 requests to exactly one host — the Merlin deployment it enrolled with, recorded in its state file —
-and listens on nothing.
+and listens on nothing. That address is normally `https`; `enrol` and `set-server` also accept
+`http` for a deployment behind a private ingress or on a developer's machine, and warn when they
+do, because the update answer described below is not signed and TLS is the only thing protecting
+it in transit.
 
-It makes one further outbound request, on the updater's daily schedule: a signed `GET` to the same
-deployment asking what version it should be running, and — only if it is told a different one — a
-download from an allowlisted release host. Nothing else is contacted, ever.
+**Both binaries ask about updates, not just the updater.** Each takes the same turn against the
+same signed `GET` — the updater once a day, and the agent on every collection, which is every six
+hours with no minimum interval of its own. So a device issues that request about five times a day,
+and either component may follow it with a download from an allowlisted release host: the updater
+fetches a package to replace the agent, and the agent fetches one to replace the updater. Nothing
+else is contacted, ever.
 
 It writes to that same directory per platform:
 
@@ -208,8 +214,10 @@ It writes to that same directory per platform:
 | macOS | `/Library/Application Support/Merlin Agent` |
 | Linux | `/var/lib/merlin-agent` |
 
-`state.json` holds no secret and is readable by anyone curious — that is the point of it, and it is
-what `merlin-agent status` prints. It also records what each component is running, when each last
+`state.json` holds no secret — that is the point of it, and it is what `merlin-agent status`
+prints. Reading it does need the superuser on macOS and Linux, because the directory around it is
+`0700` to protect `device.key`; run `merlin-agent status` with `sudo` there. On Windows the
+`%ProgramData%` ACL leaves it readable. It also records what each component is running, when each last
 ran, and what the last swap did, which is what makes an unattended update inspectable on the machine
 rather than only in Merlin. `device.key` exists only where the key is software-held, and is
 protected as described in § 2. `merlin-agent.lock` is what keeps the two components from ever

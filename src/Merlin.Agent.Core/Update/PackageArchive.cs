@@ -31,6 +31,19 @@ namespace Merlin.Agent.Core.Update;
 public static class PackageArchive
 {
     /// <summary>
+    /// The largest a single extracted entry may be.
+    /// </summary>
+    /// <remarks>
+    /// Matched to the swapper's download cap deliberately: a package that arrived inside 256 MB has
+    /// no honest reason to expand past it, and the two numbers moving together is easier to keep
+    /// true than a second scale nobody remembers the reason for.
+    /// </remarks>
+    private const long MaximumEntryBytes = 256L * 1024 * 1024;
+
+    /// <summary>The largest number of entries an archive may carry.</summary>
+    private const int MaximumEntries = 512;
+
+    /// <summary>
     /// Extracts one component from an archive.
     /// </summary>
     /// <param name="archivePath">The downloaded archive.</param>
@@ -74,14 +87,20 @@ public static class PackageArchive
     {
         using ZipArchive archive = ZipFile.OpenRead(archivePath);
 
+        int seen = 0;
+
         foreach (ZipArchiveEntry entry in archive.Entries)
         {
+            Count(ref seen);
+
             if (!Matches(entry.FullName, fileName))
             {
                 continue;
             }
 
-            entry.ExtractToFile(destinationPath, overwrite: true);
+            using Stream content = entry.Open();
+
+            Extract(content, destinationPath);
             return true;
         }
 
@@ -94,19 +113,92 @@ public static class PackageArchive
         using GZipStream decompressed = new(file, CompressionMode.Decompress);
         using TarReader reader = new(decompressed);
 
+        int seen = 0;
+
         while (reader.GetNextEntry() is { } entry)
         {
+            Count(ref seen);
+
             if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile)
                 || !Matches(entry.Name, fileName))
             {
                 continue;
             }
 
-            entry.ExtractToFile(destinationPath, overwrite: true);
+            if (entry.DataStream is not { } content)
+            {
+                continue;
+            }
+
+            Extract(content, destinationPath);
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Counts an entry against <see cref="MaximumEntries"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>An archive is a handful of files, and a directory of millions is not a package.</b> The
+    /// download cap bounds the COMPRESSED bytes, and a central directory of empty entries costs
+    /// almost nothing to compress while costing real time to walk.
+    /// </remarks>
+    private static void Count(ref int seen)
+    {
+        if (++seen > MaximumEntries)
+        {
+            throw new InvalidDataException(
+                $"The package holds more than {MaximumEntries} entries, which no agent package "
+                + "does. Nothing was installed.");
+        }
+    }
+
+    /// <summary>
+    /// Writes one entry out, refusing to keep going past <see cref="MaximumEntryBytes"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The 256 MB download cap bounds the COMPRESSED archive and says nothing about what it
+    /// expands to.</b> A compressed stream is free to declare very little and produce a great deal,
+    /// so an archive that passed every check upstream could still fill the disk — and it would do
+    /// it as SYSTEM or root, inside the install tree, on a machine whose whole job is to keep
+    /// reporting. Counting the bytes as they are written is the only bound that holds, because the
+    /// entry's declared length is a number the archive supplies about itself.
+    /// </para>
+    /// <para>
+    /// <b>It throws rather than returning false</b>, because <c>InvalidDataException</c> is already
+    /// what a corrupt archive raises here and the caller's swap already turns it into a reported
+    /// <c>Failed</c> outcome. A new return value would need every caller to learn a new case for a
+    /// state that is simply "this package is not usable".
+    /// </para>
+    /// <para>
+    /// It stands BEHIND the SHA-256 pin and the compile-time host allowlist, both of which an
+    /// attacker must defeat first. That is what makes it defence in depth rather than the control.
+    /// </para>
+    /// </remarks>
+    private static void Extract(Stream content, string destinationPath)
+    {
+        using FileStream target = File.Create(destinationPath);
+
+        byte[] buffer = new byte[81920];
+        long total = 0;
+        int read;
+
+        while ((read = content.Read(buffer)) > 0)
+        {
+            total += read;
+
+            if (total > MaximumEntryBytes)
+            {
+                throw new InvalidDataException(
+                    $"A package entry expanded past {MaximumEntryBytes} bytes, which no agent "
+                    + "binary approaches. Nothing was installed.");
+            }
+
+            target.Write(buffer.AsSpan(0, read));
+        }
     }
 
     private static bool Matches(string entryName, string fileName) =>

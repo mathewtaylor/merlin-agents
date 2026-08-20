@@ -91,7 +91,14 @@ public sealed class MachineLock : IDisposable
         }
 
         string path = PathIn(stateDirectory);
-        DateTime deadline = DateTime.UtcNow + timeout;
+
+        // MONOTONIC, because this wait must be exactly as long as it says. DateTime.UtcNow steps
+        // when NTP corrects or a VM resumes — both most likely just after a boot, which is
+        // precisely when a scheduled run fires — and a backwards step extends this loop by the size
+        // of the step, without bound. It cannot wedge the lock, since none is held yet, but it can
+        // hold up the caller far past the two minutes it promises while parking a thread in
+        // Thread.Sleep.
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
 
         while (true)
         {
@@ -127,7 +134,7 @@ public sealed class MachineLock : IDisposable
                 accessDenied = true;
             }
 
-            if (DateTime.UtcNow >= deadline)
+            if (Environment.TickCount64 >= deadline)
             {
                 return null;
             }

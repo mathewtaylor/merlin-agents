@@ -6,7 +6,9 @@ so that agreement between them is checkable by reading them side by side:
 - client — `src/Merlin.Agent.Core/Crypto/AgentSignature.cs` (this repository)
 - server — `Merlin.Endpoints.Application.Services.AgentSignature` (the Merlin repository)
 
-Frozen vectors for the canonical strings live in `tests/Merlin.Agent.Core.Tests/AgentSignatureTests.cs`.
+Frozen vectors for the report and enrol canonical strings live in
+`tests/Merlin.Agent.Core.Tests/AgentSignatureTests.cs`; the update one is in
+`tests/Merlin.Agent.Core.Tests/UpdateGuardTests.cs`.
 **If either side is "tidied" — a separator changed, a field reordered, a timestamp reformatted —
 every agent in the field stops being able to report.** Those tests are what makes that a build
 failure rather than a production outage.
@@ -146,7 +148,16 @@ Two further fields are about the agent itself rather than the machine:
 "updated and rolled back" from "never attempted", because both leave the version unmoved — and a
 silent failed update is the worst thing auto-update can produce. `Reverted` is deliberately distinct
 from `Failed`: a revert means a bad binary reached the machine and was survived, which is the case a
-staged rollout exists to catch, whereas `Failed` means nothing was replaced at all.
+staged rollout exists to catch.
+
+`Failed` is the broader of the two and covers **two** situations that read very differently on a
+device page. Usually it means nothing was replaced at all — a download failure, a hash mismatch, a
+refused host, a staged binary that would not execute — and the machine is still on what it had.
+But it is also what a failed RECOVERY reports: a component that was replaced, has not run since,
+and either could not be restored or had no retained binary to restore. That second case is the
+worst state this design admits, and `lastUpdateDetail` is what tells them apart — it names the
+missing fallback explicitly. Treat a `Failed` whose detail mentions a binary that "has not run
+since it was replaced" as a device needing attention, not as a no-op.
 
 **202** on acceptance.
 
@@ -225,7 +236,11 @@ applies the offset and retries once when the difference exceeds 30 seconds.
 | Nonce cache window | the skew tolerance |
 | Maximum body | 256 KB |
 | Report cadence | every 6 h, jittered |
-| Update-check cadence | daily, jittered by up to 2 h |
+| Update-check cadence | the updater daily, jittered by up to 2 h; the agent on every collection |
+| Minimum gap between scheduled updater checks | 1 h — `run --now` bypasses it |
+| Minimum gap between agent update checks | none, deliberately: a collection is never skipped to spare a download |
+| Maximum entries in a package archive | 512 |
+| Maximum size of an extracted package entry | 256 MB |
 | Maximum package archive | 256 MB |
 | Silence before a replaced agent is put back | 24 h — four missed collections |
 | Silence before a replaced updater is put back | 72 h — three missed checks |

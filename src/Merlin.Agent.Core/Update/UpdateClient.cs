@@ -83,6 +83,15 @@ public sealed class UpdateClient : IDisposable
         {
             BaseAddress = new Uri(serverUrl.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = TimeSpan.FromSeconds(60),
+
+            // BOUNDED, BECAUSE THIS BODY IS NEITHER ALLOWLISTED NOR HASH-PINNED. The package
+            // download has both and is streamed against a running total; this one comes from
+            // whatever address the state file names, is buffered whole by default, and is read
+            // into a string — two bytes of memory per byte on the wire — inside a process running
+            // as SYSTEM or root. Every answer this endpoint gives is a few hundred bytes.
+            // Exceeding it raises HttpRequestException, which the callers already treat as a
+            // refused request, so it adds no new failure mode.
+            MaxResponseContentBufferSize = 64 * 1024,
         };
 
         _http.DefaultRequestHeaders.UserAgent.Add(
@@ -186,8 +195,25 @@ public sealed class UpdateClient : IDisposable
                         ClockOffsetSeconds);
                 }
 
-                string content = await response.Content.ReadAsStringAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                string content;
+
+                try
+                {
+                    content = await response.Content.ReadAsStringAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+                {
+                    // A CONNECTION DROPPED MID-BODY IS AN UNREACHABLE MERLIN, not a fault. The
+                    // send above already says so; this read sat outside that reasoning, so the
+                    // same outage produced a Refused on one line and an escaped exception — which
+                    // the updater turns into a non-zero exit — on the next.
+                    return new UpdateCheck(
+                        UpdateCheckStatus.Refused,
+                        null,
+                        $"Merlin could not be reached: {exception.Message}",
+                        ClockOffsetSeconds);
+                }
 
                 if (response.IsSuccessStatusCode)
                 {

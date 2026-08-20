@@ -11,7 +11,12 @@
          with the key store itself: the UPDATER needs the same device key as the agent, from the
          same state directory, and a second enrolment or a second credential is exactly what this
          design refuses. The package resolves on every target and throws only if called off
-         Windows, which the platform guard prevents. -->
+         Windows, which the platform guard prevents.
+
+         DECLARED HERE AND ONLY HERE. Merlin.Agent carried its own copy of this line, pinned
+         separately at the same version; nothing in that project references the package — the one
+         consumer is WindowsDeviceKey, in this one — so the duplicate bought nothing and made a
+         version bump something you could do to half the build. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 
