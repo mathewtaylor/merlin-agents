@@ -177,7 +177,10 @@ process that replaces a SYSTEM binary. Four properties bound it:
 3. **The staged binary is executed once before the running one is replaced.** A digest proves the
    bytes arrived intact and says nothing about whether they run here.
 4. **Neither component ever replaces its own running image**, so whatever a bad release breaks,
-   something on the machine is still running that can put the previous binary back.
+   something on the machine is still running that can put the previous binary back. A component
+   that has been replaced and not yet seen to run is not replaced again either — the retained copy
+   is only ever one binary deep, so a second unproven swap would discard the last one known to
+   work.
 
 The residual is both binaries broken at once — a release bad in both, or an antivirus engine
 quarantining both. Nothing on the machine recovers and it needs a manual reinstall; staged rollout

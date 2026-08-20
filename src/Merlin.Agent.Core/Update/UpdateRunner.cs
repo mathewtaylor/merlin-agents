@@ -168,6 +168,29 @@ public sealed class UpdateRunner
             return state;
         }
 
+        // NEVER STACK A SWAP ON AN UNPROVEN ONE. A non-null mark here means the target was replaced
+        // and has not been seen to run since — ClearSettledBookkeeping drops it the moment it has.
+        // Replacing it again would be wrong twice over, and the second is the dangerous one:
+        //
+        //  - it resets the mark, so the window a revert is judged against restarts every run and
+        //    the revert never fires. An antivirus engine that quarantines the installed binary but
+        //    not the freshly downloaded one produces exactly this: the probe of what is installed
+        //    fails, the version therefore never matches, and the machine re-downloads and re-swaps
+        //    every day for ever;
+        //  - and Commit retains only the IMMEDIATELY preceding binary, so a second swap overwrites
+        //    the retained copy with the unproven one. The last binary known to work is gone, and a
+        //    revert — if it ever ran — would restore something that never ran either.
+        //
+        // Refusing here is what keeps `.previous` a binary that has actually executed on this
+        // machine, which is the whole premise of mutual recovery.
+        if (state.SwappedAtOf(target) is not null)
+        {
+            _log($"  {InstallLayout.FileName(target)} was replaced and has not run since, so it is "
+                + "not being replaced again. It will either run, or be put back.");
+
+            return state;
+        }
+
         SwapResult result = await _swapper
             .SwapAsync(target, version, endpoint!, sha256!, cancellationToken)
             .ConfigureAwait(false);

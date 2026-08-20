@@ -408,6 +408,66 @@ public sealed class UpdateRunnerTests
         Assert.Equal(_now.AddHours(-96), after.AgentSwappedAt);
     }
 
+    /// <summary>
+    /// A component that was replaced and has not run since is not replaced AGAIN.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Stacking an unproven swap on an unproven swap breaks recovery in two ways at once.</b>
+    /// It resets the mark a revert is timed from, so the window restarts every run and the revert
+    /// never fires — an antivirus engine that quarantines the installed binary but not the freshly
+    /// downloaded one produces exactly that, and the machine re-downloads and re-swaps daily for
+    /// ever. And <c>Commit</c> retains only the IMMEDIATELY preceding binary, so the second swap
+    /// overwrites the retained copy with the unproven one: the last binary known to work is gone,
+    /// and a revert would put back something that never ran either.
+    /// </para>
+    /// <para>
+    /// Refusing here is what keeps the retained <c>.previous</c> a binary that has actually
+    /// executed on this machine, which is the entire premise of mutual recovery.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AnUnprovenSwapIsNeverStackedOnAnotherOne()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "quarantined agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "the last agent that ran");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        AgentStateData state = Enrolled() with
+        {
+            // Replaced an hour ago and not seen to run. The installed binary will not report a
+            // version — it has been quarantined — so the advertised version does not match and
+            // the naive path would download and swap it all over again.
+            AgentSwappedAt = _now.AddHours(-1),
+            LastAgentRunAt = _now.AddHours(-3),
+            LastUpdaterRunAt = _now.AddHours(-24),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            UpdateTestKit.ProbeByPath(_ => null),
+            archive);
+
+        Assert.Null(after.LastUpdateOutcome);
+
+        // Nothing moved, and — the point of the rule — the retained binary is still the one that
+        // last actually ran, rather than having been overwritten by the unproven one.
+        Assert.Equal("quarantined agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+        Assert.Equal(
+            "the last agent that ran",
+            File.ReadAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent)));
+
+        // The mark is untouched, so the revert window keeps running from the ORIGINAL swap rather
+        // than restarting. That is what stops the machine live-locking.
+        Assert.Equal(_now.AddHours(-1), after.AgentSwappedAt);
+    }
+
     private static AgentStateData Enrolled() => new(
         "https://isms.example.com",
         Guid.NewGuid(),

@@ -232,6 +232,14 @@ applies the offset and retries once when the difference exceeds 30 seconds.
 | Corroboration required before either is put back | one completed run by the OTHER component, after the swap |
 | Enrolment key lifetime | 30 days |
 
+**A component that was replaced and has not run since is not replaced AGAIN**, however far behind
+it is. Stacking an unproven swap on an unproven one restarts the window a revert is timed from, so
+the revert never fires; and only the immediately preceding binary is retained, so the second swap
+overwrites the last copy known to have worked and leaves recovery restoring something that never
+ran either. An antivirus engine that quarantines the installed binary but not the freshly
+downloaded one produces exactly this, daily and for ever. The rule is what keeps the retained
+binary one that has actually executed on this machine.
+
 **A window on its own is not evidence, because wall clock passes while a laptop is shut.** A
 machine closed straight after a swap comes back with the window long expired and the replaced
 binary — which is perfectly good — never having run, which is indistinguishable from a broken one.
