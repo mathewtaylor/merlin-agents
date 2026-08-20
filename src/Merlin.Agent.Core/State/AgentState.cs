@@ -48,6 +48,17 @@ namespace Merlin.Agent.Core.State;
 /// mattered. Stamped from the ADVERTISED string, because that is what the block compares against.
 /// </param>
 /// <param name="UpdaterSwappedToVersion">The same, for the updater binary.</param>
+/// <param name="AgentSwapHadFallback">
+/// Whether a working agent binary was retained when the agent was replaced.
+/// <b>It is what tells "a working binary was lost" apart from "there was never one here".</b>
+/// Recovery refuses a release that was installed and then could not be put back — correct when
+/// something was lost, and wrong for a FIRST installation, where nothing was retained because
+/// nothing was there and the version is not what failed. That case is the ordinary upgrade path
+/// from a release before the updater existed: the agent installs an updater, nothing on the machine
+/// is scheduled to run it yet, and the release would otherwise be blocklisted on every machine in
+/// the fleet that had not been reinstalled.
+/// </param>
+/// <param name="UpdaterSwapHadFallback">The same, for the updater binary.</param>
 /// <param name="PendingComponent">
 /// The component that still needs moving to <see cref="PendingVersion"/>, or null.
 /// <b>This exists because the advertisement goes quiet at exactly the wrong moment.</b> Merlin
@@ -87,6 +98,8 @@ public sealed record AgentStateData(
     DateTimeOffset? UpdaterSwappedAt = null,
     string? AgentSwappedToVersion = null,
     string? UpdaterSwappedToVersion = null,
+    bool AgentSwapHadFallback = false,
+    bool UpdaterSwapHadFallback = false,
     AgentComponent? PendingComponent = null,
     string? PendingVersion = null,
     string? PendingPackageEndpoint = null,
@@ -141,6 +154,12 @@ public sealed record AgentStateData(
     public string? SwappedToVersionOf(AgentComponent component) =>
         component == AgentComponent.Agent ? AgentSwappedToVersion : UpdaterSwappedToVersion;
 
+    /// <summary>Whether a working binary was retained when a component was replaced.</summary>
+    /// <param name="component">The component.</param>
+    /// <returns><c>true</c> when there was something to fall back to.</returns>
+    public bool SwapHadFallbackOf(AgentComponent component) =>
+        component == AgentComponent.Agent ? AgentSwapHadFallback : UpdaterSwapHadFallback;
+
     /// <summary>
     /// Records that a component's binary was replaced, or clears the mark.
     /// </summary>
@@ -155,13 +174,25 @@ public sealed record AgentStateData(
     /// <param name="instant">The instant, or null to clear.</param>
     /// <param name="version">The advertised version installed, or null to clear.</param>
     /// <returns>The updated state.</returns>
+    /// <param name="hadFallback">Whether a working binary was retained by that swap.</param>
     public AgentStateData WithSwap(
         AgentComponent component,
         DateTimeOffset? instant,
-        string? version) =>
+        string? version,
+        bool hadFallback = false) =>
         component == AgentComponent.Agent
-            ? this with { AgentSwappedAt = instant, AgentSwappedToVersion = version }
-            : this with { UpdaterSwappedAt = instant, UpdaterSwappedToVersion = version };
+            ? this with
+            {
+                AgentSwappedAt = instant,
+                AgentSwappedToVersion = version,
+                AgentSwapHadFallback = hadFallback,
+            }
+            : this with
+            {
+                UpdaterSwappedAt = instant,
+                UpdaterSwappedToVersion = version,
+                UpdaterSwapHadFallback = hadFallback,
+            };
 }
 
 /// <summary>

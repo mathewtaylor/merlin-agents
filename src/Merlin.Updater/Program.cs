@@ -46,6 +46,22 @@ public static class Program
     /// </remarks>
     private static readonly TimeSpan _minimumInterval = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// How far after this process started a swap can plausibly have landed during its lock wait.
+    /// </summary>
+    /// <remarks>
+    /// <b>The was-I-replaced guard needs an upper bound or a backwards clock makes it permanent.</b>
+    /// It compares a stored instant against this run's start, which is sound while the clock moves
+    /// forward — the swap can only have happened during the lock wait, which is at most two
+    /// minutes. But a clock corrected BACKWARDS makes every previously stored instant look like the
+    /// future, so the guard would fire on every scheduled run and the machine would stop collecting
+    /// entirely until real time caught up. Beyond this bound the timestamp is not evidence of a
+    /// concurrent swap, it is evidence of a wrong clock — and carrying on is the safer reading,
+    /// because the worst case is one honest run against a binary that was replaced a while ago,
+    /// against a machine that never reports again.
+    /// </remarks>
+    private static readonly TimeSpan _concurrentSwapWindow = TimeSpan.FromMinutes(5);
+
     /// <summary>Entry point.</summary>
     /// <param name="args">Command-line arguments.</param>
     /// <returns>Zero on success.</returns>
@@ -166,7 +182,9 @@ public static class Program
         // proved itself, when it has never executed at all. The mark would then be cleared, the
         // revert could never fire, and the no-stacked-swap rule would stop engaging. Exit and let
         // the scheduler start the binary that is actually on disk; it is the only honest witness.
-        if (state.SwappedAtOf(AgentComponent.Updater) is { } replacedAt && replacedAt > startedAt)
+        if (state.SwappedAtOf(AgentComponent.Updater) is { } replacedAt
+            && replacedAt > startedAt
+            && replacedAt - startedAt <= _concurrentSwapWindow)
         {
             if (operatorRequested)
             {
@@ -230,7 +248,9 @@ public static class Program
                 swapper,
                 BinaryProbe.Default,
                 UpdateWindows.Default,
-                log);
+                log,
+                () => DateTimeOffset.UtcNow,
+                AgentState.Write);
 
             AgentStateData updated = await runner.RunAsync(
                 state,

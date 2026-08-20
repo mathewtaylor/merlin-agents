@@ -57,6 +57,8 @@ public sealed class UpdateRunner
     private readonly BinaryProbe _probe;
     private readonly UpdateWindows _windows;
     private readonly Action<string> _log;
+    private readonly Func<DateTimeOffset> _clock;
+    private readonly Action<AgentStateData> _persist;
 
     /// <summary>Initialises a new instance of the <see cref="UpdateRunner"/> class.</summary>
     /// <param name="self">Which component is running.</param>
@@ -65,19 +67,37 @@ public sealed class UpdateRunner
     /// <param name="probe">How the other component's version is read.</param>
     /// <param name="windows">How long a replaced component may stay silent.</param>
     /// <param name="log">Where progress is written.</param>
+    /// <param name="clock">
+    /// Reads the current instant. <b>The swap mark must be stamped from a reading taken AFTER the
+    /// swap, not from the instant the turn began</b> — the turn's own <c>now</c> predates an update
+    /// check and a download bounded at ten minutes, so a mark stamped from it says when this
+    /// process STARTED rather than when the file was replaced. Anything comparing that mark against
+    /// its own start instant — which is how each component decides whether it is the image that was
+    /// just replaced — then reads a swap that happened after it as one that happened before.
+    /// </param>
+    /// <param name="persist">
+    /// Writes the state out. <b>Called the moment a swap is recorded, not merely at the end of the
+    /// turn.</b> The binary is already on disk by then, so a crash before the caller's own write
+    /// would lose the mark that governs putting it back — and the next run, seeing no mark, would
+    /// replace it again and could promote an unproven binary over the working fallback.
+    /// </param>
     public UpdateRunner(
         AgentComponent self,
         InstallLayout layout,
         ComponentSwapper swapper,
         BinaryProbe probe,
         UpdateWindows windows,
-        Action<string> log)
+        Action<string> log,
+        Func<DateTimeOffset> clock,
+        Action<AgentStateData> persist)
     {
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(swapper);
         ArgumentNullException.ThrowIfNull(probe);
         ArgumentNullException.ThrowIfNull(windows);
         ArgumentNullException.ThrowIfNull(log);
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(persist);
 
         // THE TWO MUST AGREE, and nothing else makes them. Which component is running is a separate
         // constructor argument on the runner and on the swapper, in two different files — and a
@@ -98,6 +118,8 @@ public sealed class UpdateRunner
         _probe = probe;
         _windows = windows;
         _log = log;
+        _clock = clock;
+        _persist = persist;
     }
 
     /// <summary>
@@ -215,11 +237,17 @@ public sealed class UpdateRunner
             AgentUpdateOutcome.Succeeded => state
                 .WithVersion(target, result.InstalledVersion)
 
-                // The ADVERTISED string, not the one the binary reported. It is what the
-                // never-install-this-again block compares against, and the two differ exactly when
-                // an operator's spelling and the binary's disagree — the case that block is least
-                // able to afford getting wrong.
-                .WithSwap(target, now, version)
+                // STAMPED FROM A READING TAKEN NOW, after the swap — never from the turn's `now`,
+                // which predates the check and the download and would say when this process
+                // started rather than when the file was replaced. The other component compares
+                // this mark against its OWN start instant to decide whether it is the image that
+                // was just replaced, and a mark that predates the swap makes that comparison miss
+                // exactly the case it exists for.
+                //
+                // The version is the ADVERTISED string, not the one the binary reported: it is
+                // what the never-install-this-again block compares against, and the two differ
+                // exactly when an operator's spelling and the binary's disagree.
+                .WithSwap(target, _clock(), version, result.RetainedPrevious)
                 with
             {
                 LastUpdateOutcome = AgentUpdateOutcome.Succeeded,
@@ -234,6 +262,13 @@ public sealed class UpdateRunner
             },
             _ => state,
         };
+
+        if (result.Outcome == AgentUpdateOutcome.Succeeded)
+        {
+            // BEFORE ANYTHING ELSE. The binary is on disk; the mark that governs putting it back
+            // is not, until this runs.
+            _persist(state);
+        }
 
         return result.Outcome == AgentUpdateOutcome.Succeeded
             ? NoteWhatIsStillOutstanding(state, version, endpoint, sha256)
@@ -420,7 +455,34 @@ public sealed class UpdateRunner
             return state;
         }
 
-        // Nothing was retained, so there is no way back and no amount of waiting produces one.
+        // NOTHING WAS EVER THERE — a first installation, not a lost binary. The release is not what
+        // failed: something has to RUN this component and nothing has, which on the ordinary
+        // upgrade path from a release before the updater existed means its scheduled task, launch
+        // daemon or timer was never created. Blocklisting the version here would refuse a healthy
+        // release on every machine in the fleet that had not been reinstalled, and would point
+        // whoever read the message at the release instead of at the missing schedule.
+        if (!state.SwapHadFallbackOf(target))
+        {
+            _log($"  {InstallLayout.FileName(target)} has never run since it was installed.");
+
+            return state.WithSwap(target, null, null) with
+            {
+                LastUpdateOutcome = AgentUpdateOutcome.Failed,
+                LastUpdateAt = now,
+                LastUpdateDetail =
+                    $"{InstallLayout.FileName(target)} was installed here"
+                    + $"{(blocked is null ? string.Empty : $" at {blocked}")} and has never run. "
+                    + "Nothing was replaced, so nothing was put back. Check that its scheduled "
+                    + "task, launch daemon or systemd timer exists on this machine.",
+                PendingComponent = null,
+                PendingVersion = null,
+                PendingPackageEndpoint = null,
+                PendingSha256 = null,
+            };
+        }
+
+        // A working binary WAS retained and is now gone, so there is no way back and no amount of
+        // waiting produces one.
         // Clear the mark — leaving it set refuses every future version too — and block only the
         // release that got us here, so the machine stops re-downloading a package it has already
         // proved does not work while an operator publishes or pins a different one.

@@ -9,7 +9,16 @@ namespace Merlin.Agent.Core.Update;
 /// </param>
 /// <param name="Detail">A sentence for the console and for <c>status</c>.</param>
 /// <param name="InstalledVersion">The version now installed, when a swap succeeded.</param>
-public sealed record SwapResult(AgentUpdateOutcome? Outcome, string Detail, string? InstalledVersion)
+/// <param name="RetainedPrevious">
+/// Whether a working previous binary was kept when this swap committed. <b>It distinguishes "a
+/// working binary was lost" from "there was never one here"</b>, which recovery must not conflate:
+/// only the first justifies refusing the release afterwards.
+/// </param>
+public sealed record SwapResult(
+    AgentUpdateOutcome? Outcome,
+    string Detail,
+    string? InstalledVersion,
+    bool RetainedPrevious = false)
 {
     /// <summary>Nothing was attempted.</summary>
     /// <param name="detail">Why.</param>
@@ -26,8 +35,9 @@ public sealed record SwapResult(AgentUpdateOutcome? Outcome, string Detail, stri
     /// <param name="detail">What happened.</param>
     /// <param name="version">The version now installed.</param>
     /// <returns>The result.</returns>
-    public static SwapResult Succeeded(string detail, string version) =>
-        new(AgentUpdateOutcome.Succeeded, detail, version);
+    /// <param name="retainedPrevious">Whether a working previous binary was kept.</param>
+    public static SwapResult Succeeded(string detail, string version, bool retainedPrevious) =>
+        new(AgentUpdateOutcome.Succeeded, detail, version, retainedPrevious);
 }
 
 /// <summary>
@@ -246,7 +256,7 @@ public sealed class ComponentSwapper
                 _log($"  note: the package advertised {version} but the binary reports {reported}.");
             }
 
-            string failure = Commit(component, stagedBinary);
+            string failure = Commit(component, stagedBinary, out bool retainedPrevious);
 
             if (failure.Length > 0)
             {
@@ -256,8 +266,11 @@ public sealed class ComponentSwapper
             _swapped = true;
 
             return SwapResult.Succeeded(
-                $"{fileName} replaced with {reported}. The previous binary is retained beside it.",
-                reported);
+                retainedPrevious
+                    ? $"{fileName} replaced with {reported}. The previous binary is retained beside it."
+                    : $"{fileName} installed at {reported}. There was no previous binary to retain.",
+                reported,
+                retainedPrevious);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
             or HttpRequestException or InvalidDataException or TaskCanceledException)
@@ -362,12 +375,14 @@ public sealed class ComponentSwapper
     /// copy of the working binary anywhere. Renaming first means the previous image survives every
     /// failure mode, and is what the OTHER component restores from.
     /// </remarks>
-    private string Commit(AgentComponent component, string stagedBinary)
+    private string Commit(AgentComponent component, string stagedBinary, out bool retainedPrevious)
     {
         string fileName = InstallLayout.FileName(component);
         string current = _layout.PathOf(component);
         string previous = _layout.PreviousPathOf(component);
         bool retained = false;
+
+        retainedPrevious = false;
 
         try
         {
@@ -386,6 +401,7 @@ public sealed class ComponentSwapper
             {
                 File.Move(current, previous, overwrite: true);
                 retained = true;
+                retainedPrevious = true;
             }
             else if (File.Exists(current))
             {

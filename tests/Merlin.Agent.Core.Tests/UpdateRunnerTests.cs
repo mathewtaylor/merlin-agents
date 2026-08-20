@@ -588,6 +588,11 @@ public sealed class UpdateRunnerTests
         {
             AgentSwappedAt = _now.AddHours(-30),
             AgentSwappedToVersion = "9.9.9",
+
+            // A working binary WAS retained by that swap and has since gone — which is what makes
+            // refusing the release afterwards the right answer. See the sibling test for the case
+            // where nothing was ever there.
+            AgentSwapHadFallback = true,
             LastAgentRunAt = _now.AddHours(-40),
             LastUpdaterRunAt = _now.AddHours(-24),
         };
@@ -623,11 +628,109 @@ public sealed class UpdateRunnerTests
             AgentComponent.Updater, kit.Layout, http, probe, _ => { });
 
         UpdateRunner runner = new(
-            AgentComponent.Updater, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { });
+            AgentComponent.Updater, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { },
+            () => _now, _ => { });
 
         // A fresh swapper per run, exactly as a fresh process gets, and the previous run's own
         // stamp as the witness — which is what the updater passes in production.
         return await runner.RunAsync(state, state.LastUpdaterRunAt, check, now);
+    }
+
+    /// <summary>
+    /// A component installed where none existed is not blocklisted for never having run.
+    /// </summary>
+    /// <remarks>
+    /// <b>The release is not what failed — something has to RUN the component and nothing has.</b>
+    /// On the ordinary upgrade from a version before the updater existed, the agent installs an
+    /// updater onto a machine whose scheduler knows nothing about it, so it sits there unexecuted.
+    /// Refusing the version then blocklists a healthy release on every machine in the fleet that
+    /// has not been reinstalled, and tells whoever reads the message to look at the release rather
+    /// than at the missing schedule.
+    /// </remarks>
+    [Fact]
+    public async Task AComponentInstalledWhereNoneExistedIsNotBlocklistedForNeverRunning()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "an updater nothing runs");
+
+        AgentStateData state = Enrolled() with
+        {
+            UpdaterSwappedAt = _now.AddHours(-100),
+            UpdaterSwappedToVersion = "0.3.0",
+
+            // Nothing was retained because nothing was there.
+            UpdaterSwapHadFallback = false,
+            LastUpdaterRunAt = null,
+            LastAgentRunAt = _now.AddHours(-6),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Agent,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeByPath(_ => null));
+
+        // Reported, and released so a later version can still land.
+        Assert.Equal(AgentUpdateOutcome.Failed, after.LastUpdateOutcome);
+        Assert.Null(after.UpdaterSwappedAt);
+        Assert.Contains("has never run", after.LastUpdateDetail!, StringComparison.Ordinal);
+
+        // THE ASSERTION THIS EXISTS FOR: a healthy release is not refused for want of a scheduler.
+        Assert.Null(after.LastRevertedVersion);
+    }
+
+    /// <summary>
+    /// The swap mark records when the file was replaced, not when the turn began.
+    /// </summary>
+    /// <remarks>
+    /// <b>The turn's own instant predates an update check and a download bounded at ten minutes.</b>
+    /// A mark stamped from it says when this process STARTED, and the other component compares that
+    /// mark against its OWN start instant to decide whether it is the image that was just replaced
+    /// — so a mark that predates the swap makes that comparison miss exactly the window it exists
+    /// for: an agent that starts after the updater begins but before the swap lands is the pre-swap
+    /// image, is not recognised as one, and stamps a run that certifies a binary which has never
+    /// executed.
+    /// </remarks>
+    [Fact]
+    public async Task TheSwapMarkRecordsWhenTheFileWasReplaced()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "old agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        BinaryProbe probe = kit.ProbeInstalledAndStaged("0.2.0", "9.9.9");
+        ComponentSwapper swapper = new(AgentComponent.Updater, kit.Layout, http, probe, _ => { });
+
+        // The swap takes ninety seconds — a download, a hash and a probe.
+        DateTimeOffset completedAt = _now.AddSeconds(90);
+
+        UpdateRunner runner = new(
+            AgentComponent.Updater,
+            kit.Layout,
+            swapper,
+            probe,
+            UpdateWindows.Default,
+            _ => { },
+            () => completedAt,
+            _ => { });
+
+        AgentStateData after = await runner.RunAsync(
+            Enrolled(),
+            _now.AddHours(-24),
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            _now);
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, after.LastUpdateOutcome);
+
+        // Not _now. An agent that started at _now + 40s is the pre-swap image and must be able to
+        // tell, which it can only do if this instant is later than its own start.
+        Assert.Equal(completedAt, after.AgentSwappedAt);
     }
 
     private static AgentStateData Enrolled() => new(
@@ -663,7 +766,8 @@ public sealed class UpdateRunnerTests
         using HttpClient http = UpdateTestKit.Serving(archive ?? []);
 
         ComponentSwapper swapper = new(self, kit.Layout, http, probe, _ => { });
-        UpdateRunner runner = new(self, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { });
+        UpdateRunner runner = new(
+            self, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { }, () => _now, _ => { });
 
         // The state handed in is the state as READ, so its own last-run stamp is genuinely the
         // previous one — which is exactly what the updater passes in production. The agent has to

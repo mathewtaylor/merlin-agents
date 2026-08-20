@@ -83,7 +83,8 @@ public sealed class MachineLock : IDisposable
         {
             AgentState.EnsureDirectory(stateDirectory);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+            or NotSupportedException)
         {
             accessDenied = true;
             return null;
@@ -94,6 +95,12 @@ public sealed class MachineLock : IDisposable
 
         while (true)
         {
+            // PER ATTEMPT, not sticky. One transient refusal followed by ordinary contention that
+            // outlasts the wait would otherwise be reported as a rights failure, and both callers
+            // answer that by telling the operator to run as root and exiting non-zero — a red
+            // scheduler run and a wrong diagnosis for what was simply a busy machine.
+            accessDenied = false;
+
             try
             {
                 MachineLock held = new(new FileStream(
