@@ -91,6 +91,14 @@ public sealed class UpdateRunner
     /// Takes this component's turn and returns the state to persist.
     /// </summary>
     /// <param name="state">The state as read.</param>
+    /// <param name="previousSelfRunAt">
+    /// When THIS component last completed a run, before this one. <b>It is a parameter rather than
+    /// a read of <paramref name="state"/> because the agent has already stamped itself by the time
+    /// it gets here</b> — the stamp is written to disk before collection so that a crash mid-run
+    /// still counts as having run — so <c>state.LastRunOf(self)</c> would read as "now" and the
+    /// witness in <see cref="ShouldRestore"/> would be vacuous for the agent. Callers pass the
+    /// value they read before stamping.
+    /// </param>
     /// <param name="check">
     /// Asks Merlin what this device should be running. A delegate rather than a client, so the whole
     /// decision table can be exercised without a server.
@@ -100,6 +108,7 @@ public sealed class UpdateRunner
     /// <returns>The state to persist.</returns>
     public async Task<AgentStateData> RunAsync(
         AgentStateData state,
+        DateTimeOffset? previousSelfRunAt,
         Func<CancellationToken, Task<UpdateCheck>> check,
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
@@ -124,7 +133,7 @@ public sealed class UpdateRunner
 
         state = ClearSettledBookkeeping(state, target);
 
-        if (ShouldRestore(state, target, now))
+        if (ShouldRestore(state, target, previousSelfRunAt, now))
         {
             return Recover(state, target, versionAtSwap, now);
         }
@@ -253,12 +262,37 @@ public sealed class UpdateRunner
     /// Whether the component this process may replace has failed to run since it was replaced.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Reads when the binary last EXECUTED, not when it last reported successfully.</b> The
     /// question is whether the swapped-in image runs at all; a machine that has been offline for a
     /// day has a working agent and a broken network, and reverting it would trade a real binary for
     /// an imagined fault.
+    /// </para>
+    /// <para>
+    /// <b>The elapsed window alone is not evidence, because wall clock passes while a laptop is
+    /// shut.</b> A machine switched off for a weekend straight after a swap comes back with the
+    /// window long expired and the replaced binary — which is perfectly good — never having run,
+    /// which is indistinguishable from a broken one unless something says the machine was actually
+    /// UP for that window. This component's own previous run is that witness: it means "I completed
+    /// a run since the swap, on this machine, and the other component still has not". The state
+    /// file holds no other record of uptime, and inventing one would be a second clock to keep
+    /// honest.
+    /// </para>
+    /// <para>
+    /// <b>Getting this wrong is not a missed revert, it is a permanent one.</b> A false revert
+    /// writes <c>LastRevertedVersion</c>, which nothing ever clears, so the device refuses that
+    /// version for good and sits a version behind until an operator pins it elsewhere by hand. The
+    /// price of the witness is one extra cycle before a genuinely broken binary is put back — up to
+    /// a second updater run for the agent, and a matter of hours the other way round, since the
+    /// agent runs four times as often. A day's later recovery beats a fleet quietly stranding
+    /// itself one closed laptop at a time.
+    /// </para>
     /// </remarks>
-    private bool ShouldRestore(AgentStateData state, AgentComponent target, DateTimeOffset now)
+    private bool ShouldRestore(
+        AgentStateData state,
+        AgentComponent target,
+        DateTimeOffset? previousSelfRunAt,
+        DateTimeOffset now)
     {
         if (state.SwappedAtOf(target) is not { } swappedAt)
         {
@@ -266,6 +300,11 @@ public sealed class UpdateRunner
         }
 
         if (state.LastRunOf(target) is { } lastRun && lastRun > swappedAt)
+        {
+            return false;
+        }
+
+        if (previousSelfRunAt is not { } witness || witness <= swappedAt)
         {
             return false;
         }

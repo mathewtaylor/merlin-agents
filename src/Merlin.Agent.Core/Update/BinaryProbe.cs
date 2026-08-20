@@ -94,6 +94,15 @@ public sealed class BinaryProbe
         return string.IsNullOrWhiteSpace(first) ? null : first;
     }
 
+    /// <summary>
+    /// How long a drained pipe is given to reach end-of-file after the process itself has gone.
+    /// </summary>
+    /// <remarks>
+    /// A grandchild that inherited the handles keeps the pipe open after its parent exits, so even
+    /// this wait is bounded rather than trusting EOF to arrive.
+    /// </remarks>
+    private static readonly TimeSpan _drainGrace = TimeSpan.FromSeconds(5);
+
     private static ProbeResult Run(string path, string arguments, TimeSpan timeout)
     {
         ProcessStartInfo start = new(path, arguments)
@@ -114,25 +123,36 @@ public sealed class BinaryProbe
                 return new ProbeResult(false, "The process could not be started.");
             }
 
-            // Read before waiting. A binary that fills the pipe buffer while the parent blocks on
-            // exit deadlocks, and the timeout below would then read as "it hung" for a binary that
-            // was merely chatty.
-            string standardOutput = process.StandardOutput.ReadToEnd();
-            string standardError = process.StandardError.ReadToEnd();
+            // BOTH PIPES ARE DRAINED AT ONCE, AND EVERY WAIT IS BOUNDED.
+            //
+            // Reading one stream to the end and then the other is the classic deadlock, and the
+            // timeout below is no protection from it: a binary that fills the stderr buffer while
+            // the parent blocks on stdout can never exit, so the parent never REACHES WaitForExit
+            // and hangs for good. The buffer is 4 KB on Windows and 64 KB on Unix, which a
+            // quarantine notice, a loader error or a missing-library dump clears easily.
+            //
+            // It matters more here than anywhere else in the agent. This probe exists to survive a
+            // binary that does not work; it runs as SYSTEM or root; and its caller holds the
+            // machine lock for the whole run. A hang here therefore wedges that lock forever, the
+            // agent can never take it again, and the machine stops reporting permanently — which
+            // is the one outcome the whole two-binary design exists to prevent.
+            Task<string> reading = process.StandardOutput.ReadToEndAsync();
+            Task<string> failing = process.StandardError.ReadToEndAsync();
 
             if (!process.WaitForExit((int)timeout.TotalMilliseconds))
             {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (InvalidOperationException)
-                {
-                    // Already gone.
-                }
+                Terminate(process);
+
+                // Killing it closes its ends of the pipes, so the two reads above complete rather
+                // than being abandoned. Observed, then discarded: the verdict is already decided.
+                Drain(reading);
+                Drain(failing);
 
                 return new ProbeResult(false, "It did not exit within the timeout.");
             }
+
+            string standardOutput = Drain(reading);
+            string standardError = Drain(failing);
 
             if (process.ExitCode != 0)
             {
@@ -153,6 +173,41 @@ public sealed class BinaryProbe
             or InvalidOperationException or IOException or UnauthorizedAccessException)
         {
             return new ProbeResult(false, exception.Message);
+        }
+    }
+
+    /// <summary>Ends a process that outstayed its timeout, and its children with it.</summary>
+    private static void Terminate(Process process)
+    {
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+            or System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            // Already gone, or the platform refused. Either way there is nothing further to do and
+            // the caller's verdict — "it did not exit within the timeout" — is unchanged.
+        }
+    }
+
+    /// <summary>
+    /// Collects what a pipe carried, waiting only <see cref="_drainGrace"/> for it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Never throws and never waits indefinitely.</b> A read that was cancelled, faulted when
+    /// the process was killed, or is still blocked on a handle a grandchild holds open contributes
+    /// no output — which is the honest answer, and strictly better than the caller hanging on it.
+    /// </remarks>
+    private static string Drain(Task<string> read)
+    {
+        try
+        {
+            return read.Wait(_drainGrace) ? read.Result : string.Empty;
+        }
+        catch (AggregateException)
+        {
+            return string.Empty;
         }
     }
 }

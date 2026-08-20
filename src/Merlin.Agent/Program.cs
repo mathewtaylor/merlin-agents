@@ -198,6 +198,12 @@ public static class Program
             return 0;
         }
 
+        // Captured BEFORE the stamp below overwrites it. The update turn needs this agent's
+        // PREVIOUS run to judge whether the machine was actually up across a revert window — a
+        // laptop that was merely shut for a weekend has a working updater, not a broken one — and
+        // once the stamp lands there is nothing left on the record that says so.
+        DateTimeOffset? previousAgentRun = state.LastAgentRunAt;
+
         // Stamped before anything can fail, because this is the signal the UPDATER reads to decide
         // whether a binary it swapped in actually runs. A stamp written only on success would have
         // a network outage read as a broken agent and revert a working one.
@@ -248,7 +254,7 @@ public static class Program
 
             Console.WriteLine(result.Detail);
 
-            await MaintainUpdaterAsync(state, key).ConfigureAwait(false);
+            await MaintainUpdaterAsync(state, previousAgentRun, key).ConfigureAwait(false);
 
             return 0;
         }
@@ -258,11 +264,27 @@ public static class Program
     /// The agent's half of mutual replacement: it looks after the UPDATER, and never itself.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Every failure here is swallowed.</b> The report has already been sent by the time this
     /// runs; nothing it can do is worth failing a collection over, and an exception escaping would
     /// give the scheduler a failed run for a machine that is perfectly healthy.
+    /// </para>
+    /// <para>
+    /// <b>Which is why the catch is unfiltered, deliberately, and must stay that way.</b> A named
+    /// list of the expected types reads as the more careful choice and is the weaker one: it was
+    /// one, and <c>UriFormatException</c>, <c>NotSupportedException</c>, <c>ObjectDisposedException</c>
+    /// and a plain <c>OperationCanceledException</c> all walked straight past it into
+    /// <see cref="Main"/>, whose own catch is narrower still. The machine had already reported
+    /// successfully; the crash cost it the <c>AgentState.Write</c> that carried the update
+    /// bookkeeping — including an outcome that was owed to Merlin — and handed the scheduler a red
+    /// run for a healthy machine. Whatever goes wrong in an update turn, the answer is a line on
+    /// stderr and exit zero.
+    /// </para>
     /// </remarks>
-    private static async Task MaintainUpdaterAsync(AgentStateData state, ECDsa key)
+    private static async Task MaintainUpdaterAsync(
+        AgentStateData state,
+        DateTimeOffset? previousAgentRun,
+        ECDsa key)
     {
         try
         {
@@ -284,14 +306,15 @@ public static class Program
 
             AgentStateData updated = await runner.RunAsync(
                 state,
+                previousAgentRun,
                 token => client.CheckAsync(state.DeviceId, AgentRuntimeIdentifier.Current, now, token),
                 now).ConfigureAwait(false);
 
             AgentState.Write(updated);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-            or CryptographicException or HttpRequestException or InvalidOperationException
-            or TaskCanceledException)
+#pragma warning disable CA1031 // See the remarks: an unfiltered catch is the requirement here.
+        catch (Exception exception)
+#pragma warning restore CA1031
         {
             Console.Error.WriteLine($"  the updater check did not complete: {exception.Message}");
         }

@@ -37,16 +37,26 @@ public static class PackageHosts
     /// The only hosts a package may come from.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The GitHub release hosts, because that is where CI publishes — <c>github.com</c> issues the
     /// download and redirects to <c>objects.githubusercontent.com</c>, so both are needed or every
-    /// download fails on the redirect. <c>pkg.osquery.io</c> is osquery's own distribution host,
-    /// which the installer already fetches from.
+    /// download fails on the redirect.
+    /// </para>
+    /// <para>
+    /// <b>Nothing else, and a host is not added here because some other part of the product
+    /// fetches from it.</b> <c>pkg.osquery.io</c> was on this list and no code path reached it: the
+    /// only consumer of the allowlist is <c>ComponentSwapper</c>, and the installer that downloads
+    /// osquery is a shell script that never sees it. Every entry here is a host a compromised or
+    /// misconfigured Merlin can point the whole fleet's SYSTEM binary at, so an entry that buys
+    /// nothing costs exactly what it is worth. It also made <c>docs/security.md</c> §5 and the
+    /// release notes — both of which say a package comes only from the GitHub release hosts —
+    /// untrue.
+    /// </para>
     /// </remarks>
     public static IReadOnlyList<string> Allowed { get; } =
     [
         "github.com",
         "objects.githubusercontent.com",
-        "pkg.osquery.io",
     ];
 
     /// <summary>

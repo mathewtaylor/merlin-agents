@@ -16,11 +16,15 @@ public sealed class PackageHostTests
     [InlineData("https://github.com/mathewtaylor/merlin-agents/releases/download/v0.3.0/pkg.tar.gz")]
     [InlineData("https://objects.githubusercontent.com/whatever")]
     [InlineData("https://GITHUB.COM/mathewtaylor/merlin-agents/pkg.zip")]
-    [InlineData("https://pkg.osquery.io/darwin/osquery.pkg")]
     public void TheReleaseHostsAreAllowed(string endpoint) =>
         Assert.True(PackageHosts.IsAllowed(endpoint));
 
     [Theory]
+    // A host the PRODUCT fetches from is not thereby a host a PACKAGE may come from. osquery's
+    // distribution host was on this list and nothing ever reached it — the installer that downloads
+    // osquery is a shell script, and the only consumer of the allowlist is the component swapper.
+    // Every entry is a host a compromised Merlin can point the fleet's SYSTEM binary at.
+    [InlineData("https://pkg.osquery.io/darwin/osquery.pkg")]
     // The bypass family the parsed-host comparison exists to refuse. A StartsWith would wave the
     // first two straight through.
     [InlineData("https://github.com.attacker.example/merlin/pkg.tar.gz")]

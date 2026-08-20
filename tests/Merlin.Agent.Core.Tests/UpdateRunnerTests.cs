@@ -172,6 +172,11 @@ public sealed class UpdateRunnerTests
             AgentVersionInstalled = "9.9.9",
             AgentSwappedAt = _now.AddHours(-30),
             LastAgentRunAt = _now.AddHours(-40),
+
+            // This updater completed a run AFTER the swap, so the machine was demonstrably up and
+            // the agent still did not start. That is the difference between a broken binary and a
+            // closed laptop; see AClosedLaptopIsNotABrokenBinary.
+            LastUpdaterRunAt = _now.AddHours(-24),
         };
 
         AgentStateData after = await RunAsync(
@@ -206,6 +211,10 @@ public sealed class UpdateRunnerTests
             UpdaterVersionInstalled = "9.9.9",
             UpdaterSwappedAt = _now.AddHours(-100),
             LastUpdaterRunAt = _now.AddHours(-120),
+
+            // The agent collects four times a day, so its own witness costs hours rather than the
+            // extra day it costs the updater.
+            LastAgentRunAt = _now.AddHours(-6),
         };
 
         AgentStateData after = await RunAsync(
@@ -352,6 +361,53 @@ public sealed class UpdateRunnerTests
         Assert.Equal("0.2.0", after.AgentVersionInstalled);
     }
 
+    /// <summary>
+    /// A machine that was SWITCHED OFF across the window keeps the binary it was given.
+    /// </summary>
+    /// <remarks>
+    /// <b>Wall clock passes while a laptop is shut, and the elapsed window alone cannot tell the
+    /// difference.</b> A machine closed on Friday afternoon straight after a swap comes back on
+    /// Tuesday with the window long gone and the replaced agent — which is perfectly good — never
+    /// having run. Reverting there is not a missed opportunity that the next run puts right: it
+    /// writes <c>LastRevertedVersion</c>, which nothing ever clears, so that device refuses that
+    /// version for good and sits a version behind until somebody pins it elsewhere by hand. One
+    /// closed laptop at a time, a fleet strands itself.
+    /// </remarks>
+    [Fact]
+    public async Task AClosedLaptopIsNotABrokenBinary()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "new agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "old agent");
+
+        AgentStateData state = Enrolled() with
+        {
+            AgentVersionInstalled = "9.9.9",
+
+            // Swapped, and then the lid closed. NOTHING has run on this machine since — including
+            // the updater now asking the question, whose own last run is the swap itself.
+            AgentSwappedAt = _now.AddHours(-96),
+            LastAgentRunAt = _now.AddHours(-97),
+            LastUpdaterRunAt = _now.AddHours(-96),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting("9.9.9"));
+
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Null(after.LastRevertedVersion);
+        Assert.Equal("new agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+
+        // The mark stays, so the question is asked again on the next run — by which time this
+        // updater will have a run of its own after the swap to answer it with.
+        Assert.Equal(_now.AddHours(-96), after.AgentSwappedAt);
+    }
+
     private static AgentStateData Enrolled() => new(
         "https://isms.example.com",
         Guid.NewGuid(),
@@ -387,6 +443,9 @@ public sealed class UpdateRunnerTests
         ComponentSwapper swapper = new(kit.Layout, http, probe, _ => { });
         UpdateRunner runner = new(self, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { });
 
-        return await runner.RunAsync(state, check, _now);
+        // The state handed in is the state as READ, so its own last-run stamp is genuinely the
+        // previous one — which is exactly what the updater passes in production. The agent has to
+        // carry the value separately because it stamps itself before it gets here.
+        return await runner.RunAsync(state, state.LastRunOf(self), check, _now);
     }
 }

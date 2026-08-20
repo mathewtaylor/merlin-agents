@@ -229,7 +229,18 @@ applies the offset and retries once when the difference exceeds 30 seconds.
 | Maximum package archive | 256 MB |
 | Silence before a replaced agent is put back | 24 h — four missed collections |
 | Silence before a replaced updater is put back | 72 h — three missed checks |
+| Corroboration required before either is put back | one completed run by the OTHER component, after the swap |
 | Enrolment key lifetime | 30 days |
+
+**A window on its own is not evidence, because wall clock passes while a laptop is shut.** A
+machine closed straight after a swap comes back with the window long expired and the replaced
+binary — which is perfectly good — never having run, which is indistinguishable from a broken one.
+So a revert also requires that the component asking the question completed a run of its OWN after
+the swap: that is what says the machine was actually up while the other one stayed silent. It costs
+up to one extra updater run before a genuinely broken agent is put back, and a few hours the other
+way round since the agent runs four times as often. The alternative is worse than slow: a revert
+records the version it undid and that version is never installed on that device again, so a false
+revert strands the machine a version behind until somebody re-pins it by hand.
 
 Replay defence is **timestamp plus nonce, not a counter.** A monotonic counter was rejected because
 an agent that loses its state file but keeps its TPM key would restart at zero and be refused

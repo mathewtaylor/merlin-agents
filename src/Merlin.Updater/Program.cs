@@ -165,6 +165,10 @@ public static class Program
 
             AgentStateData updated = await runner.RunAsync(
                 state,
+                // This updater's PREVIOUS run, read before the runner stamps this one. It is what
+                // says the machine was actually up for the window a revert is judged against; a
+                // laptop that was merely shut has a working agent, not a broken one.
+                state.LastUpdaterRunAt,
                 token => client.CheckAsync(state.DeviceId, AgentRuntimeIdentifier.Current, now, token),
                 now).ConfigureAwait(false);
 

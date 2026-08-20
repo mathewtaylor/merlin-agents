@@ -371,4 +371,59 @@ public sealed class ComponentSwapTests
         Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
         Assert.Equal("old updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
     }
+
+    /// <summary>
+    /// A binary that floods stderr and says nothing on stdout does not wedge the probe.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Reading one pipe to the end and then the other is the classic deadlock, and the probe's
+    /// timeout is no protection from it.</b> The child blocks writing to a full stderr buffer, so
+    /// it never exits and never closes stdout; the parent blocks in <c>ReadToEnd</c> and therefore
+    /// never REACHES <c>WaitForExit</c>. The buffer is 4 KB on Windows and 64 KB on Unix, which a
+    /// quarantine notice or a loader dump clears without trying.
+    /// </para>
+    /// <para>
+    /// <b>The consequence is the one thing the two-binary design exists to prevent.</b> The wedged
+    /// process is holding the machine lock, so the agent can never take it again and the machine
+    /// stops reporting — permanently, and silently, because silence is indistinguishable from a
+    /// machine that was never enrolled. This test therefore runs on every platform: the failure is
+    /// likelier on Windows, where the buffer is smallest.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ANoisyBinaryDoesNotWedgeTheProbe()
+    {
+        using UpdateTestKit kit = new();
+
+        string noise = Path.Combine(kit.Layout.StateDirectory, "noise.txt");
+
+        Directory.CreateDirectory(kit.Layout.StateDirectory);
+        File.WriteAllText(noise, string.Concat(Enumerable.Repeat("boom boom boom boom\n", 40_000)));
+
+        // A shell rather than a staged binary, because the point is what the PROBE does with a
+        // chatty child and a unit test cannot manufacture a NativeAOT executable for four
+        // architectures.
+        (string command, string arguments) = OperatingSystem.IsWindows()
+            ? ("cmd.exe", $"/c type \"{noise}\" 1>&2")
+            : ("/bin/sh", $"-c \"cat '{noise}' >&2\"");
+
+        ProbeResult? result = null;
+
+        Thread worker = new(() =>
+            result = BinaryProbe.Default.Execute(command, arguments, TimeSpan.FromSeconds(10)))
+        {
+            IsBackground = true,
+        };
+
+        worker.Start();
+
+        Assert.True(
+            worker.Join(TimeSpan.FromSeconds(60)),
+            "BinaryProbe.Execute never returned: the probe deadlocked on a full stderr pipe.");
+
+        // It exited zero, so the probe reports it ran. What it printed to stderr is not the
+        // verdict; that a chatty binary cannot hang the machine is.
+        Assert.True(result!.Ran);
+    }
 }
