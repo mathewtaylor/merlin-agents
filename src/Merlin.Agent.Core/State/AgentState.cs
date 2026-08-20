@@ -258,7 +258,7 @@ public static class AgentState
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentNullException.ThrowIfNull(state);
 
-        System.IO.Directory.CreateDirectory(directory);
+        EnsureDirectory(directory);
 
         // Written to a temporary file and moved into place, so an interrupted write cannot leave a
         // half-written state file behind.
@@ -288,17 +288,46 @@ public static class AgentState
     /// <c>docs/security.md</c>: on those platforms the key is protected by file permissions rather
     /// than by encryption at rest.
     /// </remarks>
-    public static void EnsureDirectory()
+    public static void EnsureDirectory() => EnsureDirectory(Directory);
+
+    /// <summary>
+    /// Creates a named state directory, restricting it to the superuser on Unix.
+    /// </summary>
+    /// <remarks>
+    /// <b>The mode is applied even when the directory already exists, and that is the whole point
+    /// of this overload.</b> <c>Directory.CreateDirectory(path, mode)</c> applies its mode only at
+    /// CREATION and silently does nothing to a directory that is already there — so whichever code
+    /// path happens to run first decides the permissions for ever. That is not hypothetical: the
+    /// machine lock creates this directory too, and once it began being taken at the top of
+    /// enrolment it started winning the race, leaving <c>0755</c> behind and making this method a
+    /// no-op on exactly the install it was written for. Setting the mode every time is idempotent,
+    /// costs nothing, and heals a directory that was created loosely by anything else.
+    /// </remarks>
+    /// <param name="directory">The directory to create and restrict.</param>
+    public static void EnsureDirectory(string directory)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+
         if (OperatingSystem.IsWindows())
         {
-            System.IO.Directory.CreateDirectory(Directory);
+            System.IO.Directory.CreateDirectory(directory);
             return;
         }
 
-        System.IO.Directory.CreateDirectory(
-            Directory,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        const UnixFileMode ownerOnly =
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+        System.IO.Directory.CreateDirectory(directory, ownerOnly);
+
+        try
+        {
+            File.SetUnixFileMode(directory, ownerOnly);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Not ours to tighten. The key file inside carries 0600 in its own right, so this is a
+            // defence in depth rather than the only thing standing between a key and a reader.
+        }
     }
 }
 

@@ -83,14 +83,14 @@ public sealed class MachineLockTests
 
         try
         {
-            using MachineLock? first = MachineLock.TryAcquire(directory, TimeSpan.Zero);
+            using MachineLock? first = MachineLock.TryAcquire(directory, TimeSpan.Zero, out _);
 
             Assert.NotNull(first);
 
             // A SECOND HOLDER IS REFUSED, and this assertion is only meaningful because the lock is
             // a file handle rather than a named mutex: a mutex is re-entrant for the thread that
             // owns it, so this would succeed and the test would prove nothing.
-            using MachineLock? second = MachineLock.TryAcquire(directory, TimeSpan.Zero);
+            using MachineLock? second = MachineLock.TryAcquire(directory, TimeSpan.Zero, out _);
 
             Assert.Null(second);
         }
@@ -108,11 +108,11 @@ public sealed class MachineLockTests
 
         try
         {
-            MachineLock? first = MachineLock.TryAcquire(directory, TimeSpan.Zero);
+            MachineLock? first = MachineLock.TryAcquire(directory, TimeSpan.Zero, out _);
             Assert.NotNull(first);
             first.Dispose();
 
-            using MachineLock? second = MachineLock.TryAcquire(directory, TimeSpan.Zero);
+            using MachineLock? second = MachineLock.TryAcquire(directory, TimeSpan.Zero, out _);
 
             Assert.NotNull(second);
         }

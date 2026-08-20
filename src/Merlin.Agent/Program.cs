@@ -98,12 +98,14 @@ public static class Program
         // Enrolment replaces the state record wholesale, so it must not land while the updater is
         // mid-swap and about to write a mark of its own.
         using MachineLock? enrolLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2));
+            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
 
         if (enrolLock is null)
         {
-            Console.Error.WriteLine(
-                "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            Console.Error.WriteLine(accessDenied
+                ? "merlin-agent could not take the machine lock. It must run as root (or SYSTEM on "
+                    + "Windows); nothing was done."
+                : "The agent or the updater is running. Nothing was changed; try again in a moment.");
             return 1;
         }
 
@@ -148,14 +150,40 @@ public static class Program
                 return 1;
             }
 
-            AgentState.Write(new AgentStateData(
+            // MERGED ONTO WHAT IS ALREADY THERE, not written over it. Re-enrolling is an explicitly
+            // supported flow — the same public key updates the existing device rather than
+            // creating a second one — and it is what an operator does to fix a sick machine, which
+            // is the worst possible moment to erase the update bookkeeping. A fresh record defaults
+            // every optional field to null, so an outstanding swap mark, the version stamped with
+            // it and LastRevertedVersion all vanished, and none of them is re-derivable: the
+            // machine would then never put back a binary that does not run, and would happily
+            // re-download a release it had already proved broken here.
+            //
+            // The PENDING NOTE is deliberately cleared, because it names an address and a digest
+            // advertised by the deployment being enrolled away from.
+            AgentStateData enrolled = AgentState.Read() ?? new AgentStateData(
                 server,
                 response.DeviceId,
                 response.DeviceCode,
                 DateTimeOffset.UtcNow,
                 client.ClockOffsetSeconds,
                 LastReportAt: null,
-                LastReportJson: null));
+                LastReportJson: null);
+
+            AgentState.Write(enrolled with
+            {
+                ServerUrl = server,
+                DeviceId = response.DeviceId,
+                DeviceCode = response.DeviceCode,
+                EnrolledAt = DateTimeOffset.UtcNow,
+                ClockOffsetSeconds = client.ClockOffsetSeconds,
+                LastReportAt = null,
+                LastReportJson = null,
+                PendingComponent = null,
+                PendingVersion = null,
+                PendingPackageEndpoint = null,
+                PendingSha256 = null,
+            });
 
             Console.WriteLine($"Enrolled as {response.DeviceCode} ({response.Status}).");
             Console.WriteLine($"Platform:    {AgentPlatformInfo.DisplayName}");
@@ -198,14 +226,29 @@ public static class Program
             return 1;
         }
 
+        // Captured BEFORE the lock wait, so a swap that lands DURING that wait can be told apart
+        // from one that predates this process. See the guard after the re-read.
+        DateTimeOffset startedAt = DateTimeOffset.UtcNow;
+
         // Not being able to take it means the updater is mid-run and may be replacing this very
         // binary. Reporting anyway would be harmless; collecting into a directory being rewritten
         // would not. The scheduler fires again in six hours.
         using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2));
+            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
 
         if (machineLock is null)
         {
+            // A RIGHTS FAILURE IS NOT CONTENTION, and reporting it as such is how a machine goes
+            // quiet while looking healthy: an agent started without root or SYSTEM waited out the
+            // whole timeout and then exited ZERO, collecting nothing, on every scheduled fire.
+            if (accessDenied)
+            {
+                Console.Error.WriteLine(
+                    "merlin-agent could not take the machine lock. It must run as root (or SYSTEM "
+                    + "on Windows); nothing was collected.");
+                return 1;
+            }
+
             Console.Error.WriteLine(
                 "The updater is running. Nothing was collected; the agent will try again on its "
                 + "next scheduled run.");
@@ -221,6 +264,26 @@ public static class Program
         // Both schedulers fire missed runs on wake, so a laptop opening its lid produces exactly
         // this overlap routinely.
         state = AgentState.Read() ?? state;
+
+        // THIS PROCESS IS NOT EVIDENCE ABOUT A BINARY THAT REPLACED IT. The updater may have
+        // swapped merlin-agent while this run sat waiting for the lock — the wait is up to two
+        // minutes and both schedulers fire missed runs on wake, so the overlap is ordinary. The
+        // image executing here is then the OLD one, already loaded into memory, and stamping a run
+        // would tell the next updater run that the NEW binary has proved itself when it has never
+        // executed. ClearSettledBookkeeping would drop the swap mark, ShouldRestore would
+        // short-circuit for ever, and the replaced binary could never be put back — the recovery
+        // this whole design exists for, defeated by a stamp rather than by anything going wrong.
+        //
+        // Exit without stamping, without reporting and without taking the update turn. One
+        // collection is skipped; the scheduler starts the binary that is actually on disk next
+        // interval, and that run is the only honest witness for it.
+        if (state.SwappedAtOf(AgentComponent.Agent) is { } replacedAt && replacedAt > startedAt)
+        {
+            Console.Error.WriteLine(
+                "This agent was replaced while it waited for the lock. Nothing was collected; the "
+                + "new binary runs on the next scheduled collection.");
+            return 0;
+        }
 
         // Captured BEFORE the stamp below overwrites it. The update turn needs this agent's
         // PREVIOUS run to judge whether the machine was actually up across a revert window — a
@@ -254,27 +317,14 @@ public static class Program
             using ReportClient client = new(state.ServerUrl, key, Version);
 
             // THE ATTEMPT IS TOTAL, so the update turn below is reached whatever the network did.
-            // ReportAsync does not catch, so an outage, a DNS failure, a proxy change or an expired
-            // certificate threw straight past the turn into Main — and those are three of the four
-            // cases the ordering below exists to serve. Only a server REFUSAL was reaching it. A
-            // hung server was worse: the client timeout raises TaskCanceledException, which Main
-            // did not filter for either, so the agent died with a stack trace. Recovery needs no
-            // network at all, so a machine that cannot reach Merlin is precisely the one that must
-            // still be able to put a broken updater back.
-            TransportResult result;
-            string json;
-
-            try
-            {
-                (result, json) = await client
-                    .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
-            {
-                result = new TransportResult(false, exception.Message, null);
-                json = state.LastReportJson ?? string.Empty;
-            }
+            // ReportAsync now reports an unreachable Merlin as a failed report rather than throwing
+            // — an outage, a DNS failure, a proxy change or an expired certificate used to go
+            // straight past the turn into Main, and those are three of the four cases the ordering
+            // below exists to serve. It is caught THERE rather than here so the JSON it built still
+            // comes back with it; catching here left `status` showing the previous payload.
+            (TransportResult result, string json) = await client
+                .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
+                .ConfigureAwait(false);
 
             // The payload is persisted whether or not Merlin accepted it, so `status` can always
             // show the operator exactly what this machine tried to send.
@@ -534,12 +584,14 @@ public static class Program
         // this while the updater happens to be mid-swap persists a pre-image and erases the swap
         // mark, which is a broken binary that can never be put back.
         using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2));
+            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
 
         if (machineLock is null)
         {
-            Console.Error.WriteLine(
-                "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            Console.Error.WriteLine(accessDenied
+                ? "merlin-agent could not take the machine lock. It must run as root (or SYSTEM on "
+                    + "Windows); nothing was done."
+                : "The agent or the updater is running. Nothing was changed; try again in a moment.");
             return 1;
         }
 
@@ -636,12 +688,14 @@ public static class Program
         // this while the updater happens to be mid-swap persists a pre-image and erases the swap
         // mark, which is a broken binary that can never be put back.
         using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2));
+            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
 
         if (machineLock is null)
         {
-            Console.Error.WriteLine(
-                "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            Console.Error.WriteLine(accessDenied
+                ? "merlin-agent could not take the machine lock. It must run as root (or SYSTEM on "
+                    + "Windows); nothing was done."
+                : "The agent or the updater is running. Nothing was changed; try again in a moment.");
             return 1;
         }
 
@@ -697,8 +751,31 @@ public static class Program
 
     private static int Uninstall()
     {
-        DeviceKey.Delete(AgentState.SoftwareKeyPath);
-        AgentState.Delete();
+        // UNDER THE LOCK, like every other command that writes state. Without it an uninstall
+        // racing a mid-swap updater is undone by that updater's closing AgentState.Write, which
+        // RESURRECTS state.json — pointing at a device whose key has just been deleted. The next
+        // collect then creates a fresh key and every report from that machine is refused for ever,
+        // which is a considerably worse end state than a failed uninstall.
+        using (MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied))
+        {
+            if (machineLock is null)
+            {
+                Console.Error.WriteLine(accessDenied
+                    ? "merlin-agent could not take the machine lock. It must run as root (or "
+                        + "SYSTEM on Windows); nothing was removed."
+                    : "The agent or the updater is running. Nothing was removed; try again in a "
+                        + "moment.");
+                return 1;
+            }
+
+            DeviceKey.Delete(AgentState.SoftwareKeyPath);
+            AgentState.Delete();
+        }
+
+        // Only once the lock is released, or the file being removed is the one still held.
+        TryRemove(MachineLock.PathIn(AgentState.Directory));
+        TryRemoveDirectory(InstallLayout.Current.StagingDirectory);
 
         Console.WriteLine("Local agent state and signing key removed.");
         Console.WriteLine(
@@ -706,6 +783,36 @@ public static class Program
             + "the machine is being decommissioned.");
 
         return 0;
+    }
+
+    private static void TryRemove(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Uninstall reports what it removed; a leftover lock file is inert and harmless.
+        }
+    }
+
+    private static void TryRemoveDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // As above: a leftover staging tree is litter, not a failure worth reporting.
+        }
     }
 
     /// <summary>

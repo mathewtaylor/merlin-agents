@@ -178,10 +178,21 @@ public sealed class ComponentSwapper
         string fileName = InstallLayout.FileName(component);
         string staging = Path.Combine(_layout.StagingDirectory, Guid.NewGuid().ToString("N"));
 
-        Directory.CreateDirectory(staging);
-
         try
         {
+            // CREATING THE STAGING TREE IS INSIDE THE TRY, because it is one of the things most
+            // likely to fail and the caller must hear about it as an OUTCOME. Outside it, an
+            // install directory that cannot be created into threw straight out of this method, so
+            // no LastUpdateOutcome was recorded and nothing reached Merlin — the whole failure
+            // class invisible, with the updater exiting 1 on every scheduled run for ever.
+            //
+            // The whole staging tree is pruned first, not just this attempt's own directory. A
+            // reboot or a kill mid-download leaves a partial package of up to 256 MB behind, and
+            // since staging moved beside the binaries that is now litter in %ProgramFiles% or
+            // /opt that nothing else would ever collect.
+            TryDeleteDirectory(_layout.StagingDirectory);
+            Directory.CreateDirectory(staging);
+
             string archivePath = Path.Combine(staging, "package");
 
             _log($"  fetching {version} for {fileName}...");
@@ -360,29 +371,29 @@ public sealed class ComponentSwapper
 
         try
         {
-            if (File.Exists(current))
+            // ONLY RETAIN A BINARY THAT ACTUALLY RUNS — and, just as importantly, NEVER DELETE
+            // ONE. "There is no previous" is a state the recovery path handles; "there is a
+            // previous that does not work" is one it cannot, because it would put that binary back
+            // and call the machine recovered. So an unprovable outgoing binary is simply not
+            // promoted, and whatever `.previous` already holds — a binary that did run — is left
+            // exactly where it is, which is strictly better than either alternative.
+            //
+            // It must not delete, because the probe cannot tell "ran and refused" from "could not
+            // be asked": a process-creation failure and a thirty-second timeout under an antivirus
+            // scan both read as no version. Deleting the only copy of a working binary because a
+            // probe timed out is a worse failure than the one this rule exists to prevent.
+            if (File.Exists(current) && _probe.Version(current) is not null)
             {
-                // ONLY RETAIN A BINARY THAT ACTUALLY RUNS. "There is no previous" is a state the
-                // recovery path handles; "there is a previous that does not work" is one it cannot,
-                // because it would put that binary back and call the machine recovered. The case is
-                // real: when a component is released from an unrecoverable swap the installed image
-                // is one that never ran, and retaining it here would quietly make it the thing a
-                // later revert restores.
-                if (_probe.Version(current) is not null)
-                {
-                    File.Move(current, previous, overwrite: true);
-                    retained = true;
-                }
-                else
-                {
-                    _log($"  the {fileName} being replaced does not run, so it is not being kept as "
-                        + "the fallback.");
-
-                    File.Delete(current);
-                }
+                File.Move(current, previous, overwrite: true);
+                retained = true;
+            }
+            else if (File.Exists(current))
+            {
+                _log($"  the {fileName} being replaced could not be shown to run, so it is not "
+                    + "being promoted to the fallback. Whatever is already retained stays.");
             }
 
-            File.Move(stagedBinary, current);
+            File.Move(stagedBinary, current, overwrite: true);
             MakeExecutable(current);
 
             return string.Empty;

@@ -1,3 +1,5 @@
+using Merlin.Agent.Core.State;
+
 namespace Merlin.Agent.Core.Update;
 
 /// <summary>
@@ -51,12 +53,41 @@ public sealed class MachineLock : IDisposable
     /// </remarks>
     /// <param name="stateDirectory">The directory the lock file lives in.</param>
     /// <param name="timeout">How long to keep trying.</param>
-    /// <returns>The held lock, or <c>null</c> when the other component has it.</returns>
-    public static MachineLock? TryAcquire(string stateDirectory, TimeSpan timeout)
+    /// <param name="accessDenied">
+    /// Set when the lock could not be taken because this process lacks the RIGHTS to, rather than
+    /// because the other component holds it. <b>The two must not look the same to a caller.</b>
+    /// Contention is ordinary and the right response is to exit quietly; a permissions failure is
+    /// not, and reporting it as "the updater is running" meant an agent started without root or
+    /// SYSTEM spun for the full timeout and then exited zero — on every scheduled fire, for ever,
+    /// with the machine collecting nothing and looking healthy while it did.
+    /// </param>
+    /// <returns>The held lock, or <c>null</c> when it could not be taken.</returns>
+    public static MachineLock? TryAcquire(
+        string stateDirectory,
+        TimeSpan timeout,
+        out bool accessDenied)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
 
-        Directory.CreateDirectory(stateDirectory);
+        accessDenied = false;
+
+        // THROUGH THE ONE HELPER, so the lock cannot be what creates this directory loosely. It
+        // runs at the top of enrolment now, which makes it the first thing to touch the state
+        // directory on a fresh machine — and a plain CreateDirectory there left 0755 behind that
+        // nothing afterwards could tighten.
+        //
+        // It is inside the guard because creating the directory is itself a thing a process
+        // without the rights cannot do, and an exception escaping here would be a crash where the
+        // caller has a considered answer for exactly this case.
+        try
+        {
+            AgentState.EnsureDirectory(stateDirectory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            accessDenied = true;
+            return null;
+        }
 
         string path = PathIn(stateDirectory);
         DateTime deadline = DateTime.UtcNow + timeout;
@@ -65,11 +96,16 @@ public sealed class MachineLock : IDisposable
         {
             try
             {
-                return new MachineLock(new FileStream(
+                MachineLock held = new(new FileStream(
                     path,
                     FileMode.OpenOrCreate,
                     FileAccess.ReadWrite,
                     FileShare.None));
+
+                // Taken in the end, so whatever an earlier attempt saw was contention after all.
+                accessDenied = false;
+
+                return held;
             }
             catch (IOException)
             {
@@ -77,7 +113,11 @@ public sealed class MachineLock : IDisposable
             }
             catch (UnauthorizedAccessException)
             {
-                // On some platforms a share violation surfaces this way. Same meaning.
+                // On some platforms a share violation surfaces this way — but so does a genuine
+                // permissions failure, and only one of them is worth waiting out. Retrying costs
+                // nothing if it was contention; the flag is what stops the caller reporting a
+                // rights problem as a healthy run once the wait is over.
+                accessDenied = true;
             }
 
             if (DateTime.UtcNow >= deadline)

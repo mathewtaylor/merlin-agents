@@ -51,8 +51,175 @@ public sealed class UpdateOrchestrationTests
         Assert.Equal(AgentUpdateOutcome.Succeeded, result.Outcome);
         Assert.Equal("new updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
 
-        // The broken one is gone rather than kept as the thing a revert would restore.
+        // Not promoted to the fallback: a revert must never restore a binary that never ran.
         Assert.False(File.Exists(kit.Layout.PreviousPathOf(AgentComponent.Updater)));
+    }
+
+    /// <summary>
+    /// An unprovable outgoing binary is not promoted — and the fallback already held is not lost.
+    /// </summary>
+    /// <remarks>
+    /// <b>The probe cannot tell "ran and refused" from "could not be asked".</b> A
+    /// process-creation failure and a thirty-second timeout under an antivirus scan both come back
+    /// as no version, so deleting the outgoing binary on that evidence can destroy the only working
+    /// copy on the machine — a worse failure than the one the rule exists to prevent. Nothing is
+    /// ever deleted: whatever is already retained stays exactly where it is.
+    /// </remarks>
+    [Fact]
+    public async Task AnUnprovableSwapLeavesTheExistingFallbackAlone()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "an updater that cannot be asked");
+        File.WriteAllText(
+            kit.Layout.PreviousPathOf(AgentComponent.Updater), "the last updater that ran");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        BinaryProbe probe = UpdateTestKit.ProbeByPath(path =>
+            path.StartsWith(kit.Layout.StagingDirectory, StringComparison.Ordinal) ? "9.9.9" : null);
+
+        ComponentSwapper swapper = new(AgentComponent.Agent, kit.Layout, http, probe, _ => { });
+
+        SwapResult result = await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "9.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, result.Outcome);
+
+        // THE ASSERTION THIS EXISTS FOR: the binary that did run is still the fallback.
+        Assert.Equal(
+            "the last updater that ran",
+            File.ReadAllText(kit.Layout.PreviousPathOf(AgentComponent.Updater)));
+    }
+
+    /// <summary>
+    /// A swap prunes staging it did not clean up last time.
+    /// </summary>
+    /// <remarks>
+    /// A reboot or a kill mid-download leaves a partial package of up to 256 MB behind, and since
+    /// staging sits beside the binaries that is litter in <c>%ProgramFiles%</c> or <c>/opt</c> that
+    /// nothing else would ever collect.
+    /// </remarks>
+    [Fact]
+    public async Task ASwapPrunesStagingLeftBehindByAnEarlierRun()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        string orphan = Path.Combine(kit.Layout.StagingDirectory, "abandoned");
+
+        Directory.CreateDirectory(orphan);
+        File.WriteAllText(Path.Combine(orphan, "package"), "half a download");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            AgentComponent.Agent, kit.Layout, http, UpdateTestKit.ProbeReporting("9.9.9"), _ => { });
+
+        await swapper.SwapAsync(
+            AgentComponent.Updater,
+            "9.9.9",
+            UpdateTestKit.AllowedEndpoint,
+            UpdateTestKit.Digest(archive));
+
+        Assert.False(Directory.Exists(orphan));
+    }
+
+    /// <summary>
+    /// An install directory that cannot be written to is a reported outcome, never a throw.
+    /// </summary>
+    /// <remarks>
+    /// <b>"The outcome is REPORTED, never inferred" has to hold for the boring failures too.</b>
+    /// Creating the staging tree sat outside the try that turns failures into a result, so an
+    /// unwritable install directory threw out of the swap: no outcome recorded, nothing reaching
+    /// Merlin, and the updater exiting non-zero on every scheduled run for ever.
+    /// </remarks>
+    [Fact]
+    public async Task AnUnwritableInstallDirectoryIsReportedRatherThanThrown()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            AgentComponent.Agent, kit.Layout, http, UpdateTestKit.ProbeReporting("9.9.9"), _ => { });
+
+        UnixFileMode original = File.GetUnixFileMode(kit.Layout.InstallDirectory);
+
+        File.SetUnixFileMode(
+            kit.Layout.InstallDirectory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+
+        try
+        {
+            SwapResult result = await swapper.SwapAsync(
+                AgentComponent.Updater,
+                "9.9.9",
+                UpdateTestKit.AllowedEndpoint,
+                UpdateTestKit.Digest(archive));
+
+            Assert.Equal(AgentUpdateOutcome.Failed, result.Outcome);
+        }
+        finally
+        {
+            File.SetUnixFileMode(kit.Layout.InstallDirectory, original);
+        }
+    }
+
+    /// <summary>
+    /// A lock that cannot be taken for want of RIGHTS is not reported as contention.
+    /// </summary>
+    /// <remarks>
+    /// The two look identical to a caller unless the lock says which it was — and an agent started
+    /// without root or SYSTEM then waited out the whole timeout, printed "the updater is running"
+    /// and exited ZERO, collecting nothing, on every scheduled fire.
+    /// </remarks>
+    [Fact]
+    public void ALockRefusedForWantOfRightsSaysSo()
+    {
+        if (OperatingSystem.IsWindows() || Environment.UserName == "root")
+        {
+            return;
+        }
+
+        string root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+
+        // The state directory does not exist and its parent cannot be written to — which is what a
+        // non-root agent meets on a machine installed by root, and the case where the directory
+        // cannot even be CREATED, let alone locked.
+        string directory = Path.Combine(root, "state");
+
+        Directory.CreateDirectory(root);
+        File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+
+        try
+        {
+            using MachineLock? held = MachineLock.TryAcquire(
+                directory, TimeSpan.Zero, out bool accessDenied);
+
+            Assert.Null(held);
+            Assert.True(accessDenied, "A permissions failure was reported as contention.");
+        }
+        finally
+        {
+            File.SetUnixFileMode(
+                root,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     /// <summary>
@@ -173,6 +340,51 @@ public sealed class UpdateOrchestrationTests
             "ProcessRunner.Run never returned: it deadlocked on a full pipe.");
 
         Assert.True(outcome!.Exited);
+    }
+
+    /// <summary>
+    /// Taking the machine lock does not leave the state directory readable by everyone.
+    /// </summary>
+    /// <remarks>
+    /// <b>Whichever code path creates this directory first decides its permissions for ever</b> —
+    /// <c>Directory.CreateDirectory(path, mode)</c> applies its mode only at creation and does
+    /// nothing to a directory already there. The lock began being taken at the top of enrolment,
+    /// which made it the first thing to touch the directory on a fresh machine, and a plain create
+    /// left <c>0755</c> that the key store's later call could no longer tighten. The key file
+    /// carries <c>0600</c> in its own right, so this is defence in depth — but
+    /// <c>docs/security.md</c> states 0700 on the directory, and a statement in that document is
+    /// either true or it should not be there.
+    /// </remarks>
+    [Fact]
+    public void TakingTheLockLeavesTheStateDirectoryOwnerOnly()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "state");
+
+        try
+        {
+            using (MachineLock? held = MachineLock.TryAcquire(directory, TimeSpan.FromSeconds(1), out _))
+            {
+                Assert.NotNull(held);
+            }
+
+            UnixFileMode mode = File.GetUnixFileMode(directory);
+
+            Assert.Equal(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                mode);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(Path.GetDirectoryName(directory)!, recursive: true);
+            }
+        }
     }
 
     private static async Task<UpdateCheck> CheckWith(HttpClient http, ECDsa key)

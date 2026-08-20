@@ -124,20 +124,43 @@ public sealed class ReportClient : IDisposable
         for (int attempt = 0; attempt < 2; attempt++)
         {
             using HttpRequestMessage message = Build("api/agent/report", body, deviceId, now);
-            using HttpResponseMessage response = await _http.SendAsync(message).ConfigureAwait(false);
-            string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            if (response.IsSuccessStatusCode)
+            // A REPORT THAT COULD NOT BE MADE IS A FAILED REPORT, NOT A THROWN ONE — and this is
+            // the only place that can say so while still holding the JSON it built. When the caller
+            // wrapped the call instead, it had nothing to hand back but the PREVIOUS payload, so
+            // `merlin-agent status` showed a stale one while promising it shows exactly what this
+            // machine tried to send. That promise is a transparency commitment, not a convenience.
+            // Letting it throw is worse still: an outage then skips the update turn, which is the
+            // one part of a run that needs no network at all.
+            HttpResponseMessage response;
+
+            try
             {
-                return (new TransportResult(true, "Report accepted.", null), json);
+                response = await _http.SendAsync(message).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+            {
+                return (
+                    new TransportResult(false, $"Merlin could not be reached: {exception.Message}", null),
+                    json);
             }
 
-            if (TryLearnOffset(response.StatusCode, content, ref now, attempt))
+            using (response)
             {
-                continue;
-            }
+                string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            return (new TransportResult(false, Describe(response.StatusCode, content), null), json);
+                if (response.IsSuccessStatusCode)
+                {
+                    return (new TransportResult(true, "Report accepted.", null), json);
+                }
+
+                if (TryLearnOffset(response.StatusCode, content, ref now, attempt))
+                {
+                    continue;
+                }
+
+                return (new TransportResult(false, Describe(response.StatusCode, content), null), json);
+            }
         }
 
         return (new TransportResult(false, "The report was refused twice, including after a clock correction.", null), json);

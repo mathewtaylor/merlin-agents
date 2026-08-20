@@ -119,16 +119,27 @@ public static class Program
             return 0;
         }
 
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        // Captured BEFORE the lock wait, so a swap that lands DURING that wait can be told apart
+        // from one that predates this process. See the guard after the re-read.
+        DateTimeOffset startedAt = DateTimeOffset.UtcNow;
 
         // A SWAPPER NEVER SWAPS A TARGET THAT IS CURRENTLY RUNNING. The agent holds this same lock
         // for the whole of a collection, so failing to take it means the agent is mid-run — which
         // is not an error, and the scheduler fires again tomorrow.
         using MachineLock? machineLock = MachineLock.TryAcquire(
-            AgentState.Directory, TimeSpan.FromMinutes(2));
+            AgentState.Directory, TimeSpan.FromMinutes(2), out bool accessDenied);
 
         if (machineLock is null)
         {
+            if (accessDenied)
+            {
+                // A rights failure is not contention, and must not be reported as one.
+                Console.Error.WriteLine(
+                    "merlin-updater could not take the machine lock. It must run as root (or "
+                    + "SYSTEM on Windows); nothing was checked.");
+                return 1;
+            }
+
             if (operatorRequested)
             {
                 Console.Error.WriteLine(
@@ -148,6 +159,30 @@ public static class Program
         // this design. Both schedulers fire missed runs on wake, so a laptop opening its lid
         // produces exactly this overlap routinely.
         state = AgentState.Read() ?? state;
+
+        // THIS PROCESS IS NOT EVIDENCE ABOUT A BINARY THAT REPLACED IT. If the agent swapped this
+        // updater while we sat waiting for the lock, the image executing here is the one that was
+        // replaced — so stamping a run would tell the next agent run that the NEW updater has
+        // proved itself, when it has never executed at all. The mark would then be cleared, the
+        // revert could never fire, and the no-stacked-swap rule would stop engaging. Exit and let
+        // the scheduler start the binary that is actually on disk; it is the only honest witness.
+        if (state.SwappedAtOf(AgentComponent.Updater) is { } replacedAt && replacedAt > startedAt)
+        {
+            if (operatorRequested)
+            {
+                Console.Error.WriteLine(
+                    "This updater was replaced while it waited for the lock. Nothing was done; the "
+                    + "new binary runs on the next scheduled check.");
+            }
+
+            return 0;
+        }
+
+        // The instant used for everything that follows is taken AFTER the wait. The lock wait can
+        // be two minutes, and this value is the SIGNED request timestamp — spending a large slice
+        // of the skew tolerance before the machine's own drift is even counted invites a refusal
+        // and a wasted retry.
+        DateTimeOffset now = DateTimeOffset.UtcNow;
 
         // THE INTERVAL IS JUDGED AFTER THE RE-READ, not before the lock. A run that spent two
         // minutes waiting for the agent would otherwise be measured against a stale stamp, and a
