@@ -213,7 +213,16 @@ what `merlin-agent status` prints. It also records what each component is runnin
 ran, and what the last swap did, which is what makes an unattended update inspectable on the machine
 rather than only in Merlin. `device.key` exists only where the key is software-held, and is
 protected as described in § 2. `merlin-agent.lock` is what keeps the two components from ever
-running at once, and a `staging/` directory is used and removed during a swap.
+running at once.
+
+**A downloaded package is staged in the INSTALL directory, not here** — a `.staging/` subdirectory
+beside the binaries, used and removed during a swap. That is deliberate: a file about to become an
+installed binary has to be staged somewhere exactly as protected as the binaries themselves, and
+the install directory is administrator- or root-only. The state directory is not, on Windows: it
+inherits `%ProgramData%`'s access control, which lets ordinary users create entries in the tree.
+Harmless while it held a state file and a protected key; not harmless as the place a SYSTEM process
+extracts a binary and then executes it, where the gap between the two is a local privilege
+escalation for anyone who can win it.
 
 **The updater uses the agent's identity, not a second one.** Same state file, same device key, same
 directory, same privilege. A second enrolment would put a second credential at rest on every machine

@@ -121,13 +121,6 @@ public static class Program
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        if (!operatorRequested
-            && state.LastUpdaterRunAt is { } lastRun
-            && now - lastRun < _minimumInterval)
-        {
-            return 0;
-        }
-
         // A SWAPPER NEVER SWAPS A TARGET THAT IS CURRENTLY RUNNING. The agent holds this same lock
         // for the whole of a collection, so failing to take it means the agent is mid-run — which
         // is not an error, and the scheduler fires again tomorrow.
@@ -143,6 +136,26 @@ public static class Program
                     + "next scheduled run.");
             }
 
+            return 0;
+        }
+
+        // RE-READ UNDER THE LOCK. The snapshot above was taken BEFORE the lock, and the wait is up
+        // to two minutes — so every time that wait does its job, the holder we waited for has
+        // written state we are still holding a pre-image of. Persisting it would silently erase
+        // whatever it just recorded: the swap mark, the version stamped with it, the outcome owed
+        // to Merlin, the pending note. The lock protects the FILES; only this protects the
+        // read-modify-write cycle, and state.json is the sole authority for every safety rule in
+        // this design. Both schedulers fire missed runs on wake, so a laptop opening its lid
+        // produces exactly this overlap routinely.
+        state = AgentState.Read() ?? state;
+
+        // THE INTERVAL IS JUDGED AFTER THE RE-READ, not before the lock. A run that spent two
+        // minutes waiting for the agent would otherwise be measured against a stale stamp, and a
+        // burst of catch-up runs is precisely when both of those happen at once.
+        if (!operatorRequested
+            && state.LastUpdaterRunAt is { } lastRun
+            && now - lastRun < _minimumInterval)
+        {
             return 0;
         }
 

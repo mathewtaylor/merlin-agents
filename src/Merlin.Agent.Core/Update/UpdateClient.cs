@@ -67,6 +67,7 @@ public sealed class UpdateClient : IDisposable
 {
     private readonly HttpClient _http;
     private readonly ECDsa _key;
+    private readonly bool _ownsHttp;
 
     /// <summary>Initialises a new instance of the <see cref="UpdateClient"/> class.</summary>
     /// <param name="serverUrl">The Merlin deployment's base address.</param>
@@ -88,6 +89,34 @@ public sealed class UpdateClient : IDisposable
             new ProductInfoHeaderValue("MerlinAgent", agentVersion));
 
         _key = key;
+        _ownsHttp = true;
+        AgentVersion = agentVersion;
+        ClockOffsetSeconds = clockOffsetSeconds;
+    }
+
+    /// <summary>
+    /// Initialises a new instance against a caller-supplied client.
+    /// </summary>
+    /// <remarks>
+    /// <b>A test seam, on the same terms as <see cref="BinaryProbe"/>.</b> This class is the only
+    /// implementation of the frozen wire contract in this repository — the canonical string, the
+    /// headers, and the rule that <c>204</c> and <c>404</c> are ordinary answers rather than
+    /// failures — and it had no tests at all, because it built its own transport and there was no
+    /// way to answer it. The caller keeps ownership of what it passes: disposing a client somebody
+    /// else is still using is a worse bug than the one this exists to catch.
+    /// </remarks>
+    /// <param name="http">The transport, already addressed at the deployment.</param>
+    /// <param name="key">The device signing key.</param>
+    /// <param name="agentVersion">The calling component's version.</param>
+    /// <param name="clockOffsetSeconds">The correction learned by earlier runs.</param>
+    public UpdateClient(HttpClient http, ECDsa key, string agentVersion, long clockOffsetSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(http);
+        ArgumentNullException.ThrowIfNull(key);
+
+        _http = http;
+        _key = key;
+        _ownsHttp = false;
         AgentVersion = agentVersion;
         ClockOffsetSeconds = clockOffsetSeconds;
     }
@@ -164,8 +193,17 @@ public sealed class UpdateClient : IDisposable
                 {
                     AgentUpdateResponse? advertisement = Deserialise(content);
 
+                    // A VERSION, AN ADDRESS AND A HASH — all three, or it is not an answer. Only
+                    // the version used to be checked, so a 200 carrying a blank endpoint or digest
+                    // came back as Advertised; and when the target already matched, the note of
+                    // what the OTHER component still needs was then overwritten with those blanks
+                    // and cleared. Merlin goes quiet once the agent reports the desired version, so
+                    // there is nothing to re-learn the note from: the two components stay split
+                    // across versions, permanently and silently.
                     return advertisement is null
                         || string.IsNullOrWhiteSpace(advertisement.Version)
+                        || string.IsNullOrWhiteSpace(advertisement.PackageEndpoint)
+                        || string.IsNullOrWhiteSpace(advertisement.Sha256)
                         ? new UpdateCheck(
                             UpdateCheckStatus.Refused,
                             null,
@@ -199,7 +237,13 @@ public sealed class UpdateClient : IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        if (_ownsHttp)
+        {
+            _http.Dispose();
+        }
+    }
 
     private HttpRequestMessage Build(Guid deviceId, string? runtimeIdentifier, DateTimeOffset now)
     {

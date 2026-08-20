@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Globalization;
+using Merlin.Agent.Core.Platform;
 
 namespace Merlin.Agent.Core.Update;
 
@@ -94,120 +94,33 @@ public sealed class BinaryProbe
         return string.IsNullOrWhiteSpace(first) ? null : first;
     }
 
-    /// <summary>
-    /// How long a drained pipe is given to reach end-of-file after the process itself has gone.
-    /// </summary>
-    /// <remarks>
-    /// A grandchild that inherited the handles keeps the pipe open after its parent exits, so even
-    /// this wait is bounded rather than trusting EOF to arrive.
-    /// </remarks>
-    private static readonly TimeSpan _drainGrace = TimeSpan.FromSeconds(5);
-
     private static ProbeResult Run(string path, string arguments, TimeSpan timeout)
     {
-        ProcessStartInfo start = new(path, arguments)
+        // THE SHARED RUNNER, which is where the both-pipes-at-once rule lives. It was written here
+        // first, for the deadlock that wedges a SYSTEM process holding the machine lock; the same
+        // shape then turned out to be wrong in the osquery runner and the command runner, so the
+        // implementation moved somewhere there is only one of it.
+        ProcessOutcome outcome = ProcessRunner.Run(
+            path, arguments, Path.GetDirectoryName(path), timeout);
+
+        if (!outcome.Started || !outcome.Exited)
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(path) ?? Environment.CurrentDirectory,
-        };
-
-        try
-        {
-            using Process? process = Process.Start(start);
-
-            if (process is null)
-            {
-                return new ProbeResult(false, "The process could not be started.");
-            }
-
-            // BOTH PIPES ARE DRAINED AT ONCE, AND EVERY WAIT IS BOUNDED.
-            //
-            // Reading one stream to the end and then the other is the classic deadlock, and the
-            // timeout below is no protection from it: a binary that fills the stderr buffer while
-            // the parent blocks on stdout can never exit, so the parent never REACHES WaitForExit
-            // and hangs for good. The buffer is 4 KB on Windows and 64 KB on Unix, which a
-            // quarantine notice, a loader error or a missing-library dump clears easily.
-            //
-            // It matters more here than anywhere else in the agent. This probe exists to survive a
-            // binary that does not work; it runs as SYSTEM or root; and its caller holds the
-            // machine lock for the whole run. A hang here therefore wedges that lock forever, the
-            // agent can never take it again, and the machine stops reporting permanently — which
-            // is the one outcome the whole two-binary design exists to prevent.
-            Task<string> reading = process.StandardOutput.ReadToEndAsync();
-            Task<string> failing = process.StandardError.ReadToEndAsync();
-
-            if (!process.WaitForExit((int)timeout.TotalMilliseconds))
-            {
-                Terminate(process);
-
-                // Killing it closes its ends of the pipes, so the two reads above complete rather
-                // than being abandoned. Observed, then discarded: the verdict is already decided.
-                Drain(reading);
-                Drain(failing);
-
-                return new ProbeResult(false, "It did not exit within the timeout.");
-            }
-
-            string standardOutput = Drain(reading);
-            string standardError = Drain(failing);
-
-            if (process.ExitCode != 0)
-            {
-                string detail = standardError.Trim().Length > 0
-                    ? standardError.Trim()
-                    : standardOutput.Trim();
-
-                return new ProbeResult(false, string.Format(
-                    CultureInfo.InvariantCulture,
-                    "It exited with code {0}. {1}",
-                    process.ExitCode,
-                    detail).Trim());
-            }
-
-            return new ProbeResult(true, standardOutput);
+            return new ProbeResult(false, outcome.StandardError);
         }
-        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception
-            or InvalidOperationException or IOException or UnauthorizedAccessException)
-        {
-            return new ProbeResult(false, exception.Message);
-        }
-    }
 
-    /// <summary>Ends a process that outstayed its timeout, and its children with it.</summary>
-    private static void Terminate(Process process)
-    {
-        try
+        if (outcome.ExitCode != 0)
         {
-            process.Kill(entireProcessTree: true);
-        }
-        catch (Exception exception) when (exception is InvalidOperationException
-            or System.ComponentModel.Win32Exception or NotSupportedException)
-        {
-            // Already gone, or the platform refused. Either way there is nothing further to do and
-            // the caller's verdict — "it did not exit within the timeout" — is unchanged.
-        }
-    }
+            string detail = outcome.StandardError.Trim().Length > 0
+                ? outcome.StandardError.Trim()
+                : outcome.StandardOutput.Trim();
 
-    /// <summary>
-    /// Collects what a pipe carried, waiting only <see cref="_drainGrace"/> for it.
-    /// </summary>
-    /// <remarks>
-    /// <b>Never throws and never waits indefinitely.</b> A read that was cancelled, faulted when
-    /// the process was killed, or is still blocked on a handle a grandchild holds open contributes
-    /// no output — which is the honest answer, and strictly better than the caller hanging on it.
-    /// </remarks>
-    private static string Drain(Task<string> read)
-    {
-        try
-        {
-            return read.Wait(_drainGrace) ? read.Result : string.Empty;
+            return new ProbeResult(false, string.Format(
+                CultureInfo.InvariantCulture,
+                "It exited with code {0}. {1}",
+                outcome.ExitCode,
+                detail).Trim());
         }
-        catch (AggregateException)
-        {
-            return string.Empty;
-        }
+
+        return new ProbeResult(true, outcome.StandardOutput);
     }
 }

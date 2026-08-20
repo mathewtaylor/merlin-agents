@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using Merlin.Agent.Core.Platform;
 
 namespace Merlin.Agent.Collection;
 
@@ -31,53 +31,15 @@ public static class CommandRunner
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
         ArgumentNullException.ThrowIfNull(arguments);
 
-        ProcessStartInfo startInfo = new()
-        {
-            FileName = fileName,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        // THE SHARED RUNNER. This used to redirect standard error and then never read it, which is
+        // the pipe deadlock in its guaranteed rather than racy form: once the child had written
+        // 4 KB (Windows) or 64 KB (Unix) of warnings it could not proceed, and the parent was
+        // already blocked reading stdout, so the timeout below was never reached. A collection
+        // holds the machine-wide lock, so a wedge here costs the machine its ability to report AND
+        // the updater's ability to put a broken agent back.
+        ProcessOutcome outcome = ProcessRunner.Run(fileName, arguments, timeout);
 
-        foreach (string argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        try
-        {
-            using Process? process = Process.Start(startInfo);
-
-            if (process is null)
-            {
-                return null;
-            }
-
-            string output = process.StandardOutput.ReadToEnd();
-
-            if (!process.WaitForExit((int)timeout.TotalMilliseconds))
-            {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (InvalidOperationException)
-                {
-                    // Already exited between the timeout and the kill.
-                }
-
-                return null;
-            }
-
-            return process.ExitCode == 0 ? output : null;
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            // The binary is not installed on this machine — the ordinary case for a firewall
-            // front-end that this distribution does not use.
-            return null;
-        }
+        return outcome.Succeeded ? outcome.StandardOutput : null;
     }
 
     /// <summary>Reads a file's text, or <c>null</c> when it cannot be read.</summary>

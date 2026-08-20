@@ -70,10 +70,29 @@ public sealed class InstallLayout
 
     /// <summary>The staging directory a downloaded archive is unpacked into.</summary>
     /// <remarks>
-    /// Under the state directory rather than the install directory, so a half-finished swap never
-    /// leaves a stray executable beside the ones the schedulers point at.
+    /// <para>
+    /// <b>Under the INSTALL directory, because a file that is about to become an installed binary
+    /// must be staged somewhere exactly as protected as the binaries themselves.</b> The installer
+    /// puts those in <c>%ProgramFiles%\Merlin Agent</c>, <c>/opt/merlin-agent</c> or
+    /// <c>/usr/local/merlin-agent</c> — administrator- or root-only. Anyone who can write there can
+    /// already replace the binary outright, so staging there adds no exposure that does not already
+    /// exist.
+    /// </para>
+    /// <para>
+    /// <b>It was under the state directory, and that was wrong on Windows.</b>
+    /// <c>%ProgramData%\Merlin Agent</c> inherits its parent's access control, which grants
+    /// ordinary users the right to create entries in the tree — harmless while that directory held
+    /// only a state file and a DPAPI-protected key, and not harmless once it became the place a
+    /// SYSTEM process extracts a binary and then EXECUTES it. The window between extracting and
+    /// executing is a local privilege escalation for anyone who can win it.
+    /// </para>
+    /// <para>
+    /// A dedicated SUBDIRECTORY, not the install directory itself, so the original reason for the
+    /// old location still holds: a half-finished swap never leaves a stray executable beside the
+    /// ones the schedulers point at.
+    /// </para>
     /// </remarks>
-    public string StagingDirectory => Path.Combine(StateDirectory, "staging");
+    public string StagingDirectory => Path.Combine(InstallDirectory, ".staging");
 
     /// <summary>The file name a component carries, with the platform's executable suffix.</summary>
     /// <param name="component">The component.</param>

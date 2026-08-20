@@ -127,7 +127,15 @@ internal sealed class UpdateTestKit : IDisposable
     public BinaryProbe ProbeInstalledAndStaged(string installed, string staged) =>
         new((path, _, _) => new ProbeResult(
             true,
-            path.StartsWith(InstallDirectory, StringComparison.Ordinal) ? installed : staged));
+
+            // STAGING IS TESTED FIRST, because it now sits UNDER the install directory — a staged
+            // path therefore also starts with the install path, and asking the looser question
+            // first quietly answered "installed" for both. The staging directory moved there
+            // deliberately: a file about to become an installed binary has to be staged somewhere
+            // exactly as protected as the binaries themselves.
+            path.StartsWith(Layout.StagingDirectory, StringComparison.Ordinal) ? staged
+            : path.StartsWith(InstallDirectory, StringComparison.Ordinal) ? installed
+            : staged));
 
     /// <summary>A probe that answers per path, for the two-component cases.</summary>
     public static BinaryProbe ProbeByPath(Func<string, string?> version) =>

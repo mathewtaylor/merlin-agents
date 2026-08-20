@@ -81,11 +81,13 @@ public static class Program
             };
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-            or CryptographicException or HttpRequestException)
+            or CryptographicException or HttpRequestException or TaskCanceledException)
         {
             // Expected operational failures: no network, no permission, no TPM. Reported plainly and
             // with a non-zero exit code so the scheduler's history shows the failure, rather than a
-            // stack trace nobody will read.
+            // stack trace nobody will read. TaskCanceledException is in the list because that is
+            // what an HttpClient timeout raises — a server that HANGS is as ordinary as one that
+            // refuses, and without it enrol, set-server and rotate-key died with a stack trace.
             Console.Error.WriteLine($"merlin-agent: {exception.Message}");
             return 1;
         }
@@ -93,6 +95,18 @@ public static class Program
 
     private static async Task<int> EnrolAsync(string[] args)
     {
+        // Enrolment replaces the state record wholesale, so it must not land while the updater is
+        // mid-swap and about to write a mark of its own.
+        using MachineLock? enrolLock = MachineLock.TryAcquire(
+            AgentState.Directory, TimeSpan.FromMinutes(2));
+
+        if (enrolLock is null)
+        {
+            Console.Error.WriteLine(
+                "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            return 1;
+        }
+
         string? server = ArgumentValue(args, "--server");
         string? enrolmentKey = ArgumentValue(args, "--enrolment-key") ?? ArgumentValue(args, "--enrollment-key");
 
@@ -198,6 +212,16 @@ public static class Program
             return 0;
         }
 
+        // RE-READ UNDER THE LOCK. The snapshot above was taken before the lock was taken, and the
+        // wait is up to two minutes — so every time that wait does its job, the holder we waited
+        // for has written state we are still holding a pre-image of. Persisting it silently erases
+        // whatever it just recorded: the swap mark, the version stamped with it, the outcome owed
+        // to Merlin and the pending note. The lock protects the FILES; only this protects the
+        // read-modify-write cycle, and state.json is the sole authority for every safety rule here.
+        // Both schedulers fire missed runs on wake, so a laptop opening its lid produces exactly
+        // this overlap routinely.
+        state = AgentState.Read() ?? state;
+
         // Captured BEFORE the stamp below overwrites it. The update turn needs this agent's
         // PREVIOUS run to judge whether the machine was actually up across a revert window — a
         // laptop that was merely shut for a weekend has a working updater, not a broken one — and
@@ -229,9 +253,28 @@ public static class Program
 
             using ReportClient client = new(state.ServerUrl, key, Version);
 
-            (TransportResult result, string json) = await client
-                .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
-                .ConfigureAwait(false);
+            // THE ATTEMPT IS TOTAL, so the update turn below is reached whatever the network did.
+            // ReportAsync does not catch, so an outage, a DNS failure, a proxy change or an expired
+            // certificate threw straight past the turn into Main — and those are three of the four
+            // cases the ordering below exists to serve. Only a server REFUSAL was reaching it. A
+            // hung server was worse: the client timeout raises TaskCanceledException, which Main
+            // did not filter for either, so the agent died with a stack trace. Recovery needs no
+            // network at all, so a machine that cannot reach Merlin is precisely the one that must
+            // still be able to put a broken updater back.
+            TransportResult result;
+            string json;
+
+            try
+            {
+                (result, json) = await client
+                    .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+            {
+                result = new TransportResult(false, exception.Message, null);
+                json = state.LastReportJson ?? string.Empty;
+            }
 
             // The payload is persisted whether or not Merlin accepted it, so `status` can always
             // show the operator exactly what this machine tried to send.
@@ -486,6 +529,20 @@ public static class Program
     /// </remarks>
     private static async Task<int> SetServerAsync(string[] args)
     {
+        // THE SAME MACHINE-WIDE LOCK the scheduled commands take, and for the same reason: this
+        // reads state, does network work, and writes state back. Without it an operator running
+        // this while the updater happens to be mid-swap persists a pre-image and erases the swap
+        // mark, which is a broken binary that can never be put back.
+        using MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, TimeSpan.FromMinutes(2));
+
+        if (machineLock is null)
+        {
+            Console.Error.WriteLine(
+                "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            return 1;
+        }
+
         AgentStateData? state = AgentState.Read();
 
         if (state is null)
@@ -574,6 +631,20 @@ public static class Program
     /// </remarks>
     private static async Task<int> RotateAsync()
     {
+        // THE SAME MACHINE-WIDE LOCK the scheduled commands take, and for the same reason: this
+        // reads state, does network work, and writes state back. Without it an operator running
+        // this while the updater happens to be mid-swap persists a pre-image and erases the swap
+        // mark, which is a broken binary that can never be put back.
+        using MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, TimeSpan.FromMinutes(2));
+
+        if (machineLock is null)
+        {
+            Console.Error.WriteLine(
+                "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            return 1;
+        }
+
         AgentStateData? state = AgentState.Read();
 
         if (state is null)

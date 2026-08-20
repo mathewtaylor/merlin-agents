@@ -79,6 +79,19 @@ public sealed class UpdateRunner
         ArgumentNullException.ThrowIfNull(windows);
         ArgumentNullException.ThrowIfNull(log);
 
+        // THE TWO MUST AGREE, and nothing else makes them. Which component is running is a separate
+        // constructor argument on the runner and on the swapper, in two different files — and a
+        // mismatch is not a partial failure but a silent total one: every swap comes back as a
+        // self-swap refusal, no update ever lands anywhere in the fleet, and no test can see it
+        // because each half is individually correct.
+        if (swapper.Self != self)
+        {
+            throw new ArgumentException(
+                $"The swapper was built for {swapper.Self} but this runner is {self}. They must be "
+                + "the same component, or every swap is refused as a self-swap.",
+                nameof(swapper));
+        }
+
         _self = self;
         _layout = layout;
         _swapper = swapper;
@@ -395,6 +408,16 @@ public sealed class UpdateRunner
                 LastUpdateAt = now,
                 LastUpdateDetail = result.Detail,
             };
+        }
+
+        if (File.Exists(_layout.PreviousPathOf(target)))
+        {
+            // A previous binary IS retained, so this NothingToDo is the swapper's one-move-per-run
+            // rule rather than an empty cupboard. Keep the mark and try again next run: clearing it
+            // here would release a component that is still recoverable, and block a version that
+            // was never the problem. Unreachable while each process builds one swapper and takes
+            // one turn, which is exactly why it is worth stating.
+            return state;
         }
 
         // Nothing was retained, so there is no way back and no amount of waiting produces one.

@@ -106,6 +106,11 @@ public sealed class ComponentSwapper
     }
 
     /// <summary>
+    /// Which component is running, so a caller can check it agrees with its own idea of that.
+    /// </summary>
+    public AgentComponent Self => _self;
+
+    /// <summary>
     /// The refusal issued when something asks this process to replace its own running image.
     /// </summary>
     /// <param name="component">The component that was asked for.</param>
@@ -348,6 +353,7 @@ public sealed class ComponentSwapper
     /// </remarks>
     private string Commit(AgentComponent component, string stagedBinary)
     {
+        string fileName = InstallLayout.FileName(component);
         string current = _layout.PathOf(component);
         string previous = _layout.PreviousPathOf(component);
         bool retained = false;
@@ -356,8 +362,24 @@ public sealed class ComponentSwapper
         {
             if (File.Exists(current))
             {
-                File.Move(current, previous, overwrite: true);
-                retained = true;
+                // ONLY RETAIN A BINARY THAT ACTUALLY RUNS. "There is no previous" is a state the
+                // recovery path handles; "there is a previous that does not work" is one it cannot,
+                // because it would put that binary back and call the machine recovered. The case is
+                // real: when a component is released from an unrecoverable swap the installed image
+                // is one that never ran, and retaining it here would quietly make it the thing a
+                // later revert restores.
+                if (_probe.Version(current) is not null)
+                {
+                    File.Move(current, previous, overwrite: true);
+                    retained = true;
+                }
+                else
+                {
+                    _log($"  the {fileName} being replaced does not run, so it is not being kept as "
+                        + "the fallback.");
+
+                    File.Delete(current);
+                }
             }
 
             File.Move(stagedBinary, current);
@@ -377,13 +399,12 @@ public sealed class ComponentSwapper
                 }
                 catch (IOException)
                 {
-                    return $"{InstallLayout.FileName(component)} could not be replaced "
-                        + $"({exception.Message}) and the previous binary could not be put back "
-                        + $"either. It is at {previous}.";
+                    return $"{fileName} could not be replaced ({exception.Message}) and the "
+                        + $"previous binary could not be put back either. It is at {previous}.";
                 }
             }
 
-            return $"{InstallLayout.FileName(component)} was not replaced: {exception.Message}";
+            return $"{fileName} was not replaced: {exception.Message}";
         }
     }
 

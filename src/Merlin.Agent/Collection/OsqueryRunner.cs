@@ -152,56 +152,31 @@ public sealed class OsqueryRunner
 
     private (string? Output, string? Error) Execute(params string[] arguments)
     {
-        ProcessStartInfo startInfo = new()
-        {
-            FileName = _osqueryPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        // THE SHARED RUNNER. This used to read stdout to the end and then stderr, which is the
+        // deadlock the binary probe documents: osqueryi writes a glog warning per query, and a
+        // child that fills the stderr buffer while the parent blocks on stdout can never exit — so
+        // the parent never reaches the timeout at all. It matters more than a dead run, because a
+        // collection holds the machine-wide lock: a wedged osqueryi means the updater can never
+        // take that lock and can never put a broken agent back, and the machine goes silent.
+        ProcessOutcome outcome = ProcessRunner.Run(_osqueryPath, arguments, _timeout);
 
-        foreach (string argument in arguments)
+        if (!outcome.Started)
         {
-            startInfo.ArgumentList.Add(argument);
+            return (null, outcome.StandardError);
         }
 
-        try
+        if (!outcome.Exited)
         {
-            using Process? process = Process.Start(startInfo);
-
-            if (process is null)
-            {
-                return (null, "osquery did not start");
-            }
-
-            string output = process.StandardOutput.ReadToEnd();
-            string error = process.StandardError.ReadToEnd();
-
-            if (!process.WaitForExit((int)_timeout.TotalMilliseconds))
-            {
-                // A hung query must not hold the scheduled task open. Killing the child is safe:
-                // osqueryi is a read-only shell that owns no state.
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (InvalidOperationException)
-                {
-                    // Already gone between the timeout and the kill.
-                }
-
-                return (null, "timed out");
-            }
-
-            return process.ExitCode == 0
-                ? (output, null)
-                : (null, string.IsNullOrWhiteSpace(error) ? $"exit code {process.ExitCode}" : error.Trim());
+            // A hung query must not hold the scheduled task open. Killing the child is safe:
+            // osqueryi is a read-only shell that owns no state.
+            return (null, "timed out");
         }
-        catch (System.ComponentModel.Win32Exception exception)
-        {
-            return (null, exception.Message);
-        }
+
+        return outcome.ExitCode == 0
+            ? (outcome.StandardOutput, null)
+            : (null, string.IsNullOrWhiteSpace(outcome.StandardError)
+                ? $"exit code {outcome.ExitCode}"
+                : outcome.StandardError.Trim());
     }
 }
 
