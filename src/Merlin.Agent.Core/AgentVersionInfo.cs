@@ -23,7 +23,7 @@ namespace Merlin.Agent.Core;
 public static class AgentVersionInfo
 {
     /// <summary>The version both binaries report and compare against.</summary>
-    public const string Current = "0.3.0";
+    public const string Current = "0.3.1";
 
     /// <summary>
     /// The version recorded in this assembly's metadata, for the test that pins the two together.
