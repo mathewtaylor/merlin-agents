@@ -216,6 +216,20 @@ jobs:
           # a leading `v` defensively, but the notes must not be the thing that needs forgiving.
           VERSION="${TAG#v}"
 
+          # THE TAG AND THE COMPILED VERSION MUST AGREE, and nothing else checks it.
+          # `dotnet publish` takes no -p:Version, so the binaries report whatever
+          # Directory.Build.props says. Tagging v0.3.1 while that file still reads 0.3.0
+          # publishes an archive whose agent reports the OLD version — so every device
+          # downloads it, swaps, still reports 0.3.0, and does the whole thing again the
+          # next day, forever. That is strictly worse than not updating: it is a fleet-wide
+          # nightly download that never converges and never errors.
+          PROPS_VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props)
+          if [ "$PROPS_VERSION" != "$VERSION" ]; then
+            echo "Tag ${TAG} does not match Directory.Build.props <Version>${PROPS_VERSION}</Version>." >&2
+            echo "Bump the props file in the same commit you tag, or the fleet update-loops." >&2
+            exit 1
+          fi
+
           {
             echo "Merlin Agent and Merlin Updater for Windows, macOS and Linux — NativeAOT and"
             echo "self-contained. **One archive per platform carries BOTH binaries** plus the"

@@ -10,7 +10,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Company>Merlin ISMS</Company>
     <Product>Merlin Agent</Product>
-    <Version>0.3.0</Version>
+    <Version>0.3.1</Version>
   </PropertyGroup>
 
 </Project>
