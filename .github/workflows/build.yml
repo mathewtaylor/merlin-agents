@@ -82,9 +82,20 @@ jobs:
       - run: dotnet build --configuration Release
       - run: dotnet test tests/Merlin.Agent.Core.Tests --configuration Release
 
-      - name: Publish (NativeAOT)
+      # BOTH BINARIES INTO ONE OUTPUT DIRECTORY, and therefore into ONE archive with ONE hash.
+      # They replace each other and neither ever replaces itself, so they must be at the same
+      # version: two artefacts would let a machine end up running halves that were never tested
+      # together, and would double the address-and-hash configuration an operator maintains per
+      # platform. The swapper extracts only the component it is replacing.
+      - name: Publish the agent (NativeAOT)
         run: >
           dotnet publish src/Merlin.Agent
+          --configuration Release --runtime ${{ matrix.rid }} --self-contained
+          --output artifacts/${{ matrix.rid }}
+
+      - name: Publish the updater (NativeAOT)
+        run: >
+          dotnet publish src/Merlin.Updater
           --configuration Release --runtime ${{ matrix.rid }} --self-contained
           --output artifacts/${{ matrix.rid }}
 
@@ -102,6 +113,13 @@ jobs:
           # fail on every machine.
           New-Item -ItemType Directory -Path "$out/queries" -Force | Out-Null
           Copy-Item packaging/queries/*.json "$out/queries/" -Force
+          # The updater must be IN the archive. A package missing it installs an agent that can
+          # never be updated and, worse, one with nothing left on the machine able to put a bad
+          # binary back — so a build that lost it would ship a fleet with the safety property
+          # silently removed.
+          if (-not (Test-Path "$out/merlin-updater.exe")) {
+              throw "merlin-updater.exe is missing from $out. Refusing to package."
+          }
           $name = "merlin-agent-${{ matrix.rid }}.zip"
           Compress-Archive -Path "$out/*" -DestinationPath "artifacts/$name" -Force
           $hash = (Get-FileHash "artifacts/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -121,6 +139,13 @@ jobs:
           # whose binary is not executable is indistinguishable at install time from a corrupt
           # download and costs a support call per machine.
           chmod +x "$out/merlin-agent"
+          # See the Windows step: an archive without the updater ships a fleet with the mutual
+          # recovery property silently removed.
+          if [ ! -f "$out/merlin-updater" ]; then
+            echo "merlin-updater is missing from $out. Refusing to package." >&2
+            exit 1
+          fi
+          chmod +x "$out/merlin-updater"
           name="merlin-agent-${{ matrix.rid }}.tar.gz"
           tar -czf "artifacts/$name" -C "$out" .
           if command -v sha256sum >/dev/null; then
@@ -184,43 +209,108 @@ jobs:
 
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
 
+          # THE BARE VERSION, not the tag. Merlin compares the string an operator sets against the
+          # version the agent REPORTS, and the agent reports "0.3.0" where the tag is "v0.3.0". A
+          # `v` pasted into AgentVersion would have every machine in the fleet decide it was
+          # permanently out of date and re-download the same archive nightly. The agent normalises
+          # a leading `v` defensively, but the notes must not be the thing that needs forgiving.
+          VERSION="${TAG#v}"
+
           {
-            echo "Merlin Agent for Windows, macOS and Linux — NativeAOT and self-contained."
+            echo "Merlin Agent and Merlin Updater for Windows, macOS and Linux — NativeAOT and"
+            echo "self-contained. **One archive per platform carries BOTH binaries** plus the"
+            echo "collection manifests, so the two components can never be on versions that were"
+            echo "never tested together."
+            echo
+            echo "The agent collects every six hours and replaces the **updater**; the updater runs"
+            echo "daily and replaces the **agent**. Neither ever replaces its own running image,"
+            echo "which is what lets either put the other's previous binary back."
             echo
             echo "## Merlin configuration"
             echo
-            echo "Set the agent version once, then one address and hash for each platform you deploy to."
+            echo "Set the fleet version once, then one entry per platform you deploy to. Values are"
+            echo "shown as environment variables; the \`Merlin:Endpoints:...\` colon form works too"
+            echo "wherever your host accepts it."
             echo
             echo '| Setting | Value |'
             echo '| --- | --- |'
-            echo "| \`Merlin:Endpoints:AgentVersion\` | \`${TAG}\` |"
+            echo "| \`Merlin__Endpoints__AgentVersion\` | \`${VERSION}\` |"
             echo
-            echo '| Platform | Setting prefix | Address | SHA-256 |'
-            echo '| --- | --- | --- | --- |'
+            echo "### Packages"
+            echo
+            echo "**Entries are an ORDERED LIST per platform, indexed by position.** A version"
+            echo "string contains dots and this product is configured by environment variables, so"
+            echo "a version-keyed setting could not be expressed at all — hence \`__0__\`, \`__1__\`"
+            echo "and so on."
+            echo
+            echo "**KEEP THE PREVIOUS VERSION'S ENTRY.** Rolling a machine back is nothing more"
+            echo "than pinning it to an earlier version — and if you overwrote that version's"
+            echo "entry instead of adding beside it, there is nothing to download and the pin is"
+            echo "silent. This is the piece most likely to be discovered late, at the exact moment"
+            echo "somebody needs it. Add this release as a NEW index; leave the one below it alone."
+            echo
+            echo '```'
           } > notes.md
 
           # The URLs are VERSION-PINNED, never /releases/latest/download/. Merlin pins the SHA-256
           # alongside each address, so a floating URL would mean the next release breaks every
           # install with a hash mismatch. The two values move together, by design — publishing a
           # release is therefore also an instruction to update both.
+          #
+          # The runtime identifier is spelled with an UNDERSCORE in the key. A hyphen is not
+          # portable in an environment-variable name, and Merlin folds it back when it reads the
+          # setting; a hyphenated key is silently ignored, which is how a previous outage stayed
+          # invisible with the deploy green.
+          for archive in merlin-agent-*.tar.gz merlin-agent-*.zip; do
+            [ -e "$archive" ] || continue
+            rid="${archive#merlin-agent-}"
+            rid="${rid%.tar.gz}"
+            rid="${rid%.zip}"
+            key=$(printf '%s' "$rid" | tr '-' '_')
+            hash=$(cat "$archive.sha256")
+            {
+              echo "Merlin__Endpoints__Packages__${key}__0__Version=${VERSION}"
+              echo "Merlin__Endpoints__Packages__${key}__0__AgentPackageEndpoint=$base/$archive"
+              echo "Merlin__Endpoints__Packages__${key}__0__AgentSha256=$hash"
+              echo
+            } >> notes.md
+          done
+
+          {
+            echo '```'
+            echo
+            echo "| Platform | Address | SHA-256 |"
+            echo '| --- | --- | --- |'
+          } >> notes.md
+
           for archive in merlin-agent-*.tar.gz merlin-agent-*.zip; do
             [ -e "$archive" ] || continue
             rid="${archive#merlin-agent-}"
             rid="${rid%.tar.gz}"
             rid="${rid%.zip}"
             hash=$(cat "$archive.sha256")
-            echo "| \`$rid\` | \`Merlin:Endpoints:Packages:$rid\` | \`$base/$archive\` | \`$hash\` |" >> notes.md
+            echo "| \`$rid\` | \`$base/$archive\` | \`$hash\` |" >> notes.md
           done
 
           {
             echo
-            echo "The installer refuses to serve a platform without both its address and its hash —"
-            echo "a script that downloads an unpinned binary is worse than no script. Platforms left"
+            echo "Merlin refuses to serve a platform without both its address and its hash — a"
+            echo "script that downloads an unpinned binary is worse than no script — and refuses"
+            echo "an address that is not \`https\` on its allowlisted hosts. Platforms left"
             echo "unconfigured simply do not appear on \`/admin/agent\`."
+            echo
+            echo "### Rollout"
+            echo
+            echo "Devices land in a rollout ring by a stable hash of their device id. Ring 0 is"
+            echo "advertised this version immediately and each later ring after a delay, so a bad"
+            echo "release reaches one or two machines rather than the fleet. **Promote now** and"
+            echo "**pause** are on \`/admin/agent\` and take effect on the next poll."
             echo
             echo "## Verify"
             echo
-            echo 'Each archive is published beside a `.sha256` file holding its digest.'
+            echo 'Each archive is published beside a `.sha256` file holding its digest. Every'
+            echo 'machine verifies the same digest before it extracts anything, and executes the'
+            echo 'staged binary once before it replaces the running one.'
             echo
             echo "## Signing"
             echo
@@ -228,6 +318,12 @@ jobs:
             echo "macOS Gatekeeper refuses a quarantined binary — the install script clears the"
             echo "quarantine attribute from its own download, which covers the scripted install but"
             echo "not a manual double-click."
+            echo
+            echo "Unattended updates are bounded by a **host allowlist compiled into both"
+            echo "binaries**: a package is fetched only from the GitHub release hosts, whatever a"
+            echo "Merlin deployment is configured to advertise. That pins the distribution channel"
+            echo "where a signature would pin the publisher, and is weaker than signing — mirroring"
+            echo "the binaries elsewhere needs a rebuilt agent."
           } >> notes.md
 
           # --repo is REQUIRED here: this job downloads artifacts and never checks the source out,

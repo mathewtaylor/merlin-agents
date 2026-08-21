@@ -59,7 +59,16 @@ public enum AgentPlatform
 [JsonConverter(typeof(JsonStringEnumConverter<DiskEncryptionMethod>))]
 public enum DiskEncryptionMethod
 {
-    /// <summary>No encryption state could be read. NOT the same as unencrypted.</summary>
+    /// <summary>
+    /// No encryption state could be read, <b>or</b> one was read that cannot be GRADED without a
+    /// second reading the collection did not obtain. NOT the same as unencrypted.
+    /// </summary>
+    /// <remarks>
+    /// The second half is the Windows edition: unprotected on Home is a licensing fact and
+    /// unprotected on Pro is somebody switching encryption off, so without the edition an
+    /// unprotected volume cannot be told apart, and one of the two guesses accuses a machine that
+    /// cannot comply. Reporting the raw state and withholding the grade is the honest answer.
+    /// </remarks>
     NotObserved,
 
     /// <summary>Read, and no encryption is in force.</summary>
@@ -130,6 +139,91 @@ public sealed record AgentRotateRequest(string NewPublicKey, string KeyAttestati
 public sealed record AgentRefusal(string Message, long ServerTime);
 
 /// <summary>
+/// What happened the last time a component on this machine tried to replace the other one. Mirrors
+/// Merlin's <c>AgentUpdateOutcome</c> exactly — the value crosses the wire by NAME, so the two
+/// lists must stay in step.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<AgentUpdateOutcome>))]
+public enum AgentUpdateOutcome
+{
+    /// <summary>The staged binary verified, executed once and replaced the running one.</summary>
+    Succeeded,
+
+    /// <summary>
+    /// The last attempt did not succeed. <b>It covers FOUR states that this value cannot tell
+    /// apart, and a server must not be built as though it can.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Nothing was replaced.</b> A download failure, a hash mismatch, a non-allowlisted host, a
+    /// staged binary that would not execute. The machine is still on what it had; the next
+    /// scheduled run tries again and no operator action is needed.
+    /// </para>
+    /// <para>
+    /// <b>A replacement was abandoned part-way through the move.</b> The current binary was moved
+    /// aside, the staged one could not be moved in, and the retained one could not be put back — so
+    /// there is no binary at the target path and the working one is stranded beside it. No swap
+    /// mark is written for a move that never completed, so automatic recovery does not run; the
+    /// local detail names the path it was left at. Told apart from the first only by asking the
+    /// machine, which is why this list exists.
+    /// </para>
+    /// <para>
+    /// <b>Something is installed that nothing ever ran.</b> Not a lost binary and not a bad
+    /// release — the component is present and has never started, which on the upgrade path from any
+    /// release predating the updater means its scheduled task, launch daemon or systemd timer was
+    /// never created. This is the only one of the three an operator can act on without publishing
+    /// anything, and because the missing schedule arrives with the upgrade it is normally
+    /// fleet-wide rather than one machine.
+    /// </para>
+    /// <para>
+    /// <b>A component was replaced and cannot be put back.</b> It has not run since, and either
+    /// could not be restored or had no retained binary to restore. That is the worst state this
+    /// design admits, and it is the same enum value as the other two.
+    /// </para>
+    /// <para>
+    /// The agent records a sentence naming which of the four it was, but it keeps it locally — it
+    /// is what <c>merlin-agent status</c> prints and it does not cross the wire. What narrows them
+    /// without asking the machine is corroborating evidence the report already carries: the version
+    /// of the component that failed. A <see cref="Failed"/> whose <c>agentVersion</c> has not moved
+    /// and whose reports then stop is the last case; when it is the UPDATER that failed the agent
+    /// keeps reporting normally, and <c>updaterVersion</c> — null when the updater is absent or
+    /// will not run — is the field that shows it. See <c>docs/protocol.md</c> § the report.
+    /// </para>
+    /// </remarks>
+    Failed,
+
+    /// <summary>
+    /// A swap was made and then undone: the replaced component did not run inside its window, so
+    /// the other component restored the previous binary. This is mutual recovery working, and it
+    /// is deliberately distinct from <see cref="Failed"/> — a revert means a bad binary reached the
+    /// machine and was survived, which is the case staged rollout exists to catch.
+    /// </summary>
+    Reverted,
+}
+
+/// <summary>
+/// What Merlin ADVERTISES to a machine asking whether it should be running something else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A version, an address and a hash. Nothing else, ever.</b> This record is the client half of
+/// the reason the Endpoints module's "no remote-command channel" deferral still stands: there is no
+/// verb here, no arguments, no path, no script and nothing this agent dispatches on. The moment it
+/// could say anything except "the version you should be running is X, here, with this hash", this
+/// would be a command channel wearing a different hat.
+/// </para>
+/// <para>
+/// <b>The address is still checked against a COMPILE-TIME allowlist before anything is fetched.</b>
+/// A server-side allowlist protects nothing against the threat it names, because whoever can set
+/// the address can set the allowlist beside it. See <c>PackageHosts</c>.
+/// </para>
+/// </remarks>
+/// <param name="Version">The version this device should be running.</param>
+/// <param name="PackageEndpoint">Where to fetch that version's archive for this platform.</param>
+/// <param name="Sha256">The archive's expected SHA-256, lower-case hex.</param>
+public sealed record AgentUpdateResponse(string Version, string PackageEndpoint, string Sha256);
+
+/// <summary>
 /// The posture payload, posted on every collection.
 /// </summary>
 /// <remarks>
@@ -157,6 +251,17 @@ public sealed record AgentRefusal(string Message, long ServerTime);
 /// <param name="Patching">Update readings.</param>
 /// <param name="Accounts">Local account and password-policy readings.</param>
 /// <param name="Capacity">Disk capacity readings.</param>
+/// <param name="UpdaterVersion">
+/// The companion updater's version, or <c>null</c> when the agent could not read one — because no
+/// updater is installed, or because the binary would not execute. Both cases are worth knowing and
+/// neither is worth guessing at.
+/// </param>
+/// <param name="LastUpdateOutcome">
+/// The NAME of an <see cref="AgentUpdateOutcome"/> member, or <c>null</c> when nothing has been
+/// attempted on this machine. <b>Reported, never inferred</b> — a server watching only the agent
+/// version cannot tell "updated and rolled back" from "never attempted", because both leave the
+/// version unmoved, and a silent failed update is the worst thing auto-update can produce.
+/// </param>
 public sealed record AgentReportPayload(
     DateTimeOffset CollectedAt,
     string AgentVersion,
@@ -176,7 +281,9 @@ public sealed record AgentReportPayload(
     AgentHardeningReading? Hardening,
     AgentPatchingReading? Patching,
     AgentAccountsReading? Accounts,
-    AgentCapacityReading? Capacity);
+    AgentCapacityReading? Capacity,
+    string? UpdaterVersion = null,
+    string? LastUpdateOutcome = null);
 
 /// <summary>
 /// Operating-system readings.

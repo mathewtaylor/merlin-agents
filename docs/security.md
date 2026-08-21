@@ -157,16 +157,59 @@ hand, because the script vouches only for what it verified against a pinned hash
 Trusted Signing for Windows, an Apple Developer ID for macOS) is worth resolving before wide
 distribution.
 
+### Unattended updates
+
+The same reasoning applies with more weight once a machine can replace its own binaries without
+anyone present, and **`merlin-updater` is now the higher-value target of the two** — it is the
+process that replaces a SYSTEM binary. Four properties bound it:
+
+1. **Merlin advertises; it never pushes.** The whole response is a version, an address and a hash.
+   There is no verb the machine dispatches on, and the server cannot reach a machine that does not
+   call it.
+2. **A compile-time host allowlist in both binaries.** Packages are fetched only from the GitHub
+   release hosts — `github.com` and `objects.githubusercontent.com`, the two entries of
+   `PackageHosts.Allowed`, and nothing else — whatever a deployment is configured to advertise, and
+   the final address is re-checked after redirects. A SERVER-side allowlist would protect nothing against the threat it
+   names — whoever can set the address can set the allowlist beside it — so the list is baked in and
+   **server configuration alone cannot redirect a fleet**. This pins the distribution CHANNEL where
+   a signature pins the PUBLISHER, and is weaker than signing: anyone who can publish a release on
+   those hosts is trusted by it. The cost is that mirroring the binaries elsewhere needs a rebuilt
+   agent.
+3. **The staged binary is executed once before the running one is replaced.** A digest proves the
+   bytes arrived intact and says nothing about whether they run here.
+4. **Neither component ever replaces its own running image**, so whatever a bad release breaks,
+   something on the machine is still running that can put the previous binary back. A component
+   that has been replaced and not yet seen to run is not replaced again either — the retained copy
+   is only ever one binary deep, so a second unproven swap would discard the last one known to
+   work.
+
+The residual is both binaries broken at once — a release bad in both, or an antivirus engine
+quarantining both. Nothing on the machine recovers and it needs a manual reinstall; staged rollout
+is what bounds that to one or two machines instead of the fleet, and is not optional for that
+reason.
+
 ---
 
 ## 6. What the agent can reach
 
 The agent runs with administrative rights — SYSTEM on Windows, root on macOS and Linux — which is
-what reading disk-encryption state and the local security policy requires. It makes outbound HTTPS
-requests to exactly one host — the Merlin deployment it enrolled with, recorded in its state file —
-and listens on nothing.
+what reading disk-encryption state and the local security policy requires. It makes outbound
+requests to exactly one host for everything it SENDS — the Merlin deployment it enrolled with,
+recorded in its state file — and listens on nothing. It also FETCHES from the release hosts named
+in § 5 when, and only when, it is replacing a component; that request carries no report and nothing
+about the machine. That address is normally `https`; `enrol` and `set-server` also accept
+`http` for a deployment behind a private ingress or on a developer's machine, and warn when they
+do, because the update answer described below is not signed and TLS is the only thing protecting
+it in transit.
 
-It writes to two files, in one directory per platform:
+**Both binaries ask about updates, not just the updater.** Each takes the same turn against the
+same signed `GET` — the updater once a day, and the agent on every collection, which is every six
+hours with no minimum interval of its own. So a device issues that request about five times a day,
+and either component may follow it with a download from an allowlisted release host: the updater
+fetches a package to replace the agent, and the agent fetches one to replace the updater. Nothing
+else is contacted, ever.
+
+It writes to that same directory per platform:
 
 | Platform | Directory |
 |---|---|
@@ -174,6 +217,24 @@ It writes to two files, in one directory per platform:
 | macOS | `/Library/Application Support/Merlin Agent` |
 | Linux | `/var/lib/merlin-agent` |
 
-`state.json` holds no secret and is readable by anyone curious — that is the point of it, and it is
-what `merlin-agent status` prints. `device.key` exists only where the key is software-held, and is
-protected as described in § 2.
+`state.json` holds no secret — that is the point of it, and it is what `merlin-agent status`
+prints. Reading it does need the superuser on macOS and Linux, because the directory around it is
+`0700` to protect `device.key`; run `merlin-agent status` with `sudo` there. On Windows the
+`%ProgramData%` ACL leaves it readable. It also records what each component is running, when each last
+ran, and what the last swap did, which is what makes an unattended update inspectable on the machine
+rather than only in Merlin. `device.key` exists only where the key is software-held, and is
+protected as described in § 2. `merlin-agent.lock` is what keeps the two components from ever
+running at once.
+
+**A downloaded package is staged in the INSTALL directory, not here** — a `.staging/` subdirectory
+beside the binaries, used and removed during a swap. That is deliberate: a file about to become an
+installed binary has to be staged somewhere exactly as protected as the binaries themselves, and
+the install directory is administrator- or root-only. The state directory is not, on Windows: it
+inherits `%ProgramData%`'s access control, which lets ordinary users create entries in the tree.
+Harmless while it held a state file and a protected key; not harmless as the place a SYSTEM process
+extracts a binary and then executes it, where the gap between the two is a local privilege
+escalation for anyone who can win it.
+
+**The updater uses the agent's identity, not a second one.** Same state file, same device key, same
+directory, same privilege. A second enrolment would put a second credential at rest on every machine
+for no gain.

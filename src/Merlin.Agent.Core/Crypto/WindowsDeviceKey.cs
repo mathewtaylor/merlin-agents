@@ -1,7 +1,7 @@
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 
-namespace Merlin.Agent.Crypto;
+namespace Merlin.Agent.Core.Crypto;
 
 /// <summary>
 /// The Windows key ladder — TPM through the platform crypto provider, falling back to a

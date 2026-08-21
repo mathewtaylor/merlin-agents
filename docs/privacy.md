@@ -52,6 +52,23 @@ them as *not observed*. [collection-manifest.md](collection-manifest.md) lists e
 | Local password policy (minimum length, lockout) | Authentication | A.5.17, A.8.5 | ✓ | where set | ✓ |
 | System volume free space | Capacity | A.8.6 | ✓ | ✓ | ✓ |
 | Entra device and tenant id (where joined) | Fleet-coverage join key | A.5.9 | ✓ | — | — |
+| Which agent and updater version this machine runs, and how the last self-update ended | So a fleet that has stopped updating itself is visible, and a failed update is never silent | A.8.8 | ✓ | ✓ | ✓ |
+
+The last row is about the SOFTWARE, not about you: two version strings and one word — `Succeeded`,
+`Failed` or `Reverted` — describing what happened the last time one component replaced the other.
+
+## Where it goes
+
+Reports go to your organisation's own Merlin deployment, at the address recorded in `state.json`
+and shown by `merlin-agent status`. Nothing is sent anywhere else.
+
+There is one other outbound destination, and it is worth stating plainly because it is new: to
+update itself the agent downloads a release package from **`github.com`** (which redirects to
+`objects.githubusercontent.com`), the public home of this open-source project. That request carries
+no report and nothing about you or your machine — it is an ordinary file download of a published
+release. The list of hosts a package may come from is compiled into the binary, so neither your
+Merlin deployment nor anyone able to answer for it can point this at somewhere else, and the file
+is checked against a SHA-256 fingerprint before anything is run.
 
 ## What is not collected
 

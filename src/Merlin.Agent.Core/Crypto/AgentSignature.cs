@@ -45,7 +45,19 @@ public static class AgentSignature
     /// <summary>Header carrying this agent's version.</summary>
     public const string AgentVersionHeader = "Merlin-Agent-Version";
 
+    /// <summary>
+    /// Header carrying the caller's .NET runtime identifier — <c>win-x64</c>, <c>linux-arm64</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Sent because Merlin does not know it.</b> A device row stores the PLATFORM, which says
+    /// Windows or macOS or Linux and not which architecture — and there is one binary per
+    /// architecture, each with its own hash.
+    /// </remarks>
+    public const string RuntimeIdentifierHeader = "Merlin-Agent-Rid";
+
     private const string EnrolContext = "enrol";
+
+    private const string UpdateContext = "update";
 
     /// <summary>Computes the lower-case hex SHA-256 of a request body.</summary>
     /// <param name="body">The exact bytes to be sent.</param>
@@ -80,6 +92,35 @@ public static class AgentSignature
     /// <returns>The canonical string.</returns>
     public static string CanonicalEnrol(string timestamp, string nonce, string bodyHash) =>
         string.Join('\n', EnrolContext, timestamp, nonce, bodyHash);
+
+    /// <summary>
+    /// Builds the canonical string signed by an UPDATE-CHECK request.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>No body hash, because there is no body</b> — this is a <c>GET</c>. A fixed context label
+    /// leads, exactly as it does for enrolment, so an update-check signature is domain-separated
+    /// from a report signature and neither can be presented as the other.
+    /// </para>
+    /// <para>
+    /// <b>The runtime identifier is SIGNED, not merely sent.</b> It decides which architecture's
+    /// binary is advertised, so leaving it outside the signature would let anything between this
+    /// machine and Merlin change which package it is pointed at. The hash check on the download
+    /// would catch it, but a signature covering every input to the answer is cheaper than reasoning
+    /// about what the next check happens to catch.
+    /// </para>
+    /// </remarks>
+    /// <param name="deviceId">The literal device-id header value.</param>
+    /// <param name="timestamp">The literal timestamp header value.</param>
+    /// <param name="nonce">The literal nonce header value.</param>
+    /// <param name="runtimeIdentifier">The literal runtime-identifier header value.</param>
+    /// <returns>The canonical string.</returns>
+    public static string CanonicalUpdate(
+        string deviceId,
+        string timestamp,
+        string nonce,
+        string? runtimeIdentifier) =>
+        string.Join('\n', UpdateContext, deviceId, timestamp, nonce, runtimeIdentifier ?? string.Empty);
 
     /// <summary>Renders an instant as the literal timestamp header value.</summary>
     /// <param name="instant">The instant.</param>

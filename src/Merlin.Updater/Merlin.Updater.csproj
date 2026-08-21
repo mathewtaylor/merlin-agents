@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The companion updater. It exists for one reason: to replace the AGENT, so that no process
+         on this machine ever overwrites its own running image. A single self-updating binary has
+         one unrecoverable failure — if the image it swaps in cannot execute, nothing is left
+         running here to put the old one back, and the agent is a scheduled invocation rather than a
+         resident daemon, so the machine simply goes silent until somebody visits it.
+
+         DELIBERATELY MINIMAL, and it must stay that way. No osquery, no collection, no query packs,
+         no normalisers, no reporting. It reads the same state.json and the same device key the
+         agent already has, asks Merlin one signed question, and either does nothing or swaps one
+         file. Every capability added here is a capability added to the process that replaces a
+         SYSTEM binary, which is now the higher-value target of the two (see the code-signing
+         issue). -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Merlin.Updater</RootNamespace>
+    <AssemblyName>merlin-updater</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <InvariantTimezone>false</InvariantTimezone>
+    <StripSymbols>true</StripSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Merlin.Agent.Core\Merlin.Agent.Core.csproj" />
+  </ItemGroup>
+
+</Project>

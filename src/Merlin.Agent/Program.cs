@@ -1,10 +1,12 @@
 using System.Security.Cryptography;
 using Merlin.Agent.Collection;
+using Merlin.Agent.Core;
 using Merlin.Agent.Core.Collection;
 using Merlin.Agent.Core.Contracts;
-using Merlin.Agent.Crypto;
-using Merlin.Agent.Platform;
-using Merlin.Agent.State;
+using Merlin.Agent.Core.Crypto;
+using Merlin.Agent.Core.Platform;
+using Merlin.Agent.Core.State;
+using Merlin.Agent.Core.Update;
 using Merlin.Agent.Transport;
 
 namespace Merlin.Agent;
@@ -29,7 +31,15 @@ namespace Merlin.Agent;
 /// </remarks>
 public static class Program
 {
-    private const string Version = "0.2.0";
+    /// <summary>
+    /// This agent's version — the ONE constant, shared with the updater.
+    /// </summary>
+    /// <remarks>
+    /// Both binaries ship in the same archive at the same version, and the update mechanism
+    /// compares versions, so two constants free to drift would mean a component that believed it
+    /// was current while the other was not.
+    /// </remarks>
+    private const string Version = AgentVersionInfo.Current;
 
     /// <summary>Entry point.</summary>
     /// <param name="args">Command-line arguments.</param>
@@ -70,19 +80,70 @@ public static class Program
                 _ => PrintUsage(),
             };
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-            or CryptographicException or HttpRequestException)
+        // UNFILTERED, DELIBERATELY — the same rule the updater's Main states, and it was reached
+        // there by the same route: a named list reads as the more careful choice and is the weaker
+        // one. This list had already grown twice, each time after a type walked past it and ended a
+        // scheduled run in a stack trace nobody reads, and it was still short. UriFormatException
+        // is the reachable one: a hand-edited or migrated state.json with a malformed ServerUrl
+        // throws it out of ReportClient's constructor, inside the collection — which sits OUTSIDE
+        // UpdateTurn's own fault boundary by design, so nothing below catches it.
+        //
+        // UpdateTurn already contains whatever escapes the update work and reports it as a fault.
+        // This catch is what stops everything AROUND that — reading the state, taking the lock,
+        // opening the device key, the collection itself — costing the operator a stack trace
+        // instead of a sentence and an exit code.
+#pragma warning disable CA1031
+        catch (Exception exception)
+#pragma warning restore CA1031
         {
-            // Expected operational failures: no network, no permission, no TPM. Reported plainly and
-            // with a non-zero exit code so the scheduler's history shows the failure, rather than a
-            // stack trace nobody will read.
             Console.Error.WriteLine($"merlin-agent: {exception.Message}");
             return 1;
         }
     }
 
+    /// <summary>
+    /// Says so, loudly, when a deployment address is plaintext.
+    /// </summary>
+    /// <remarks>
+    /// <b>Plaintext is permitted because a deployment behind a private ingress or on a developer's
+    /// machine is a real case — but it is not free, and it used to be silent.</b> The update-check
+    /// RESPONSE is not signed: only the request is. So TLS is the only thing standing between an
+    /// on-path attacker and the version, address and digest this machine is told to move to. The
+    /// compile-time host allowlist still confines the download to the GitHub release hosts, so the
+    /// worst case is being pinned to a different genuine release rather than to an attacker's
+    /// build — bounded, and not nothing. <c>PackageHosts</c> refuses plaintext outright for exactly
+    /// this reason; this address cannot be refused without breaking those deployments, so it warns.
+    /// </remarks>
+    /// <param name="server">The address as given.</param>
+    private static void WarnIfPlaintext(string server)
+    {
+        if (Uri.TryCreate(server, UriKind.Absolute, out Uri? parsed)
+            && parsed.Scheme == Uri.UriSchemeHttp)
+        {
+            Console.Error.WriteLine(
+                $"Warning: {server} is plaintext http. Reports and the update check are not "
+                + "protected in transit, and the update answer — the version and hash this machine "
+                + "is told to install — is not signed, so anyone on the path can change it. Use "
+                + "https unless this is a test deployment.");
+        }
+    }
+
     private static async Task<int> EnrolAsync(string[] args)
     {
+        // Enrolment replaces the state record wholesale, so it must not land while the updater is
+        // mid-swap and about to write a mark of its own.
+        using MachineLock? enrolLock = MachineLock.TryAcquire(
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied);
+
+        if (enrolLock is null)
+        {
+            Console.Error.WriteLine(accessDenied
+                ? "merlin-agent could not take the machine lock. It must run as root (or SYSTEM on "
+                    + "Windows); nothing was done."
+                : "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            return 1;
+        }
+
         string? server = ArgumentValue(args, "--server");
         string? enrolmentKey = ArgumentValue(args, "--enrolment-key") ?? ArgumentValue(args, "--enrollment-key");
 
@@ -92,6 +153,8 @@ public static class Program
                 "Usage: merlin-agent enrol --server <url> --enrolment-key <key>");
             return 1;
         }
+
+        WarnIfPlaintext(server);
 
         (ECDsa key, KeyAttestation attestation) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
 
@@ -124,14 +187,54 @@ public static class Program
                 return 1;
             }
 
-            AgentState.Write(new AgentStateData(
+            // MERGED ONTO WHAT IS ALREADY THERE, not written over it. Re-enrolling is an explicitly
+            // supported flow — the same public key updates the existing device rather than
+            // creating a second one — and it is what an operator does to fix a sick machine, which
+            // is the worst possible moment to erase the update bookkeeping. A fresh record defaults
+            // every optional field to null, so an outstanding swap mark, the version stamped with
+            // it and LastRevertedVersion all vanished, and none of them is re-derivable: the
+            // machine would then never put back a binary that does not run, and would happily
+            // re-download a release it had already proved broken here.
+            //
+            // The PENDING NOTE is deliberately cleared, because it names an address and a digest
+            // advertised by the deployment being enrolled away from.
+            AgentStateData enrolled = AgentState.Read() ?? new AgentStateData(
                 server,
                 response.DeviceId,
                 response.DeviceCode,
                 DateTimeOffset.UtcNow,
                 client.ClockOffsetSeconds,
                 LastReportAt: null,
-                LastReportJson: null));
+                LastReportJson: null);
+
+            // A DIFFERENT DEPLOYMENT GETS A CLEAN UPDATE RECORD. Preserving the bookkeeping is
+            // right when re-enrolling to the SAME Merlin — that is what stops an operator's
+            // reinstall erasing an unproven swap or the memory of a broken release. Carried across
+            // a move it is worse than useless: version strings are not global, so a release this
+            // machine blocklisted under the old deployment would be refused under a new one that
+            // considers it good, with no way to clear it short of editing state.json by hand; and
+            // the new deployment's device page would show an outcome for an update it never made.
+            bool movedDeployment = !string.Equals(
+                enrolled.ServerUrl.TrimEnd('/'), server.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
+            AgentState.Write(enrolled with
+            {
+                ServerUrl = server,
+                LastRevertedVersion = movedDeployment ? null : enrolled.LastRevertedVersion,
+                LastUpdateOutcome = movedDeployment ? null : enrolled.LastUpdateOutcome,
+                LastUpdateAt = movedDeployment ? null : enrolled.LastUpdateAt,
+                LastUpdateDetail = movedDeployment ? null : enrolled.LastUpdateDetail,
+                DeviceId = response.DeviceId,
+                DeviceCode = response.DeviceCode,
+                EnrolledAt = DateTimeOffset.UtcNow,
+                ClockOffsetSeconds = client.ClockOffsetSeconds,
+                LastReportAt = null,
+                LastReportJson = null,
+                PendingComponent = null,
+                PendingVersion = null,
+                PendingPackageEndpoint = null,
+                PendingSha256 = null,
+            });
 
             Console.WriteLine($"Enrolled as {response.DeviceCode} ({response.Status}).");
             Console.WriteLine($"Platform:    {AgentPlatformInfo.DisplayName}");
@@ -146,48 +249,185 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// Collects, reports, and then takes the agent's turn at replacing the UPDATER.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The envelope is <see cref="UpdateTurn"/>, which the updater runs too.</b> Taking the
+    /// machine lock, re-reading the state under it, refusing to stamp a run for an image that was
+    /// replaced while it waited, stamping before anything fallible, and persisting afterwards are
+    /// all its rules — written once, and under test. This method supplies only what is peculiar to
+    /// the agent: the collection and the report, which run INSIDE that lock.
+    /// </para>
+    /// <para>
+    /// <b>The report happens FIRST and the update work cannot stop it.</b> A failed update must
+    /// never leave a machine unable to report: silence in the fleet is indistinguishable from a
+    /// machine that was never enrolled, so the whole update turn sits behind the report and inside
+    /// a fault boundary that swallows everything. The outcome it records is sent on the NEXT
+    /// report, one run later, which is the price of that ordering and worth paying.
+    /// </para>
+    /// <para>
+    /// <b>The machine-wide lock is taken for the whole run.</b> It is what stops the updater
+    /// swapping this binary while it is executing — and, held across the collection rather than
+    /// around the swap alone, it also means the updater is never mid-swap when a collection starts.
+    /// That is why the collection is a hook inside the turn and not a step before it.
+    /// </para>
+    /// </remarks>
     private static async Task<int> CollectAsync()
     {
-        AgentStateData? state = AgentState.Read();
+        // What the report did, read after the turn to decide this process's exit code. The turn
+        // itself has no opinion about it: a refused report is a failed run, and a failed update is
+        // not.
+        TransportResult? report = null;
 
-        if (state is null)
-        {
-            Console.Error.WriteLine(
-                "This machine has not enrolled. Run: merlin-agent enrol --server <url> --enrolment-key <key>");
-            return 1;
-        }
-
-        (ECDsa key, _) = DeviceKey.OpenOrCreate(AgentState.SoftwareKeyPath);
-
-        using (key)
-        {
-            AgentReportPayload payload = Collect();
-
-            using ReportClient client = new(state.ServerUrl, key, Version);
-
-            (TransportResult result, string json) = await client
-                .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
-                .ConfigureAwait(false);
-
-            // The payload is persisted whether or not Merlin accepted it, so `status` can always
-            // show the operator exactly what this machine tried to send.
-            AgentState.Write(state with
+        UpdateTurn turn = new(
+            AgentComponent.Agent,
+            InstallLayout.Current,
+            () => new DeviceUpdateSession(async (key, state, token) =>
             {
-                ClockOffsetSeconds = client.ClockOffsetSeconds == 0
-                    ? state.ClockOffsetSeconds
-                    : client.ClockOffsetSeconds,
-                LastReportAt = result.Succeeded ? DateTimeOffset.UtcNow : state.LastReportAt,
-                LastReportJson = json,
-            });
+                AgentReportPayload payload = Collect() with
+                {
+                    // THE OUTCOME IS REPORTED, NEVER INFERRED. A server watching only the agent
+                    // version cannot tell "updated and rolled back" from "never attempted" — both
+                    // leave the version unmoved — and a silent failed update is the worst thing
+                    // auto-update can produce.
+                    UpdaterVersion = BinaryProbe.Default.Version(
+                        InstallLayout.Current.PathOf(AgentComponent.Updater)),
+                    LastUpdateOutcome = state.LastUpdateOutcome?.ToString(),
+                };
 
-            if (!result.Succeeded)
-            {
-                Console.Error.WriteLine($"Report refused: {result.Detail}");
+                // SEEDED WITH THE STORED OFFSET, and handed a RAW instant below. Pre-applying it
+                // here as well made the client learn a RESIDUAL, which was then persisted into a
+                // field every other reader treats as absolute — see ReportClient's remarks for why
+                // that never converges.
+                using ReportClient client = new(
+                    state.ServerUrl, key, Version, state.ClockOffsetSeconds);
+
+                // THE ATTEMPT IS TOTAL, so the update turn that follows is reached whatever the
+                // network did. ReportAsync reports an unreachable Merlin as a failed report rather
+                // than throwing — an outage, a DNS failure, a proxy change or an expired
+                // certificate used to go straight past the turn into Main, and those are three of
+                // the four cases the ordering exists to serve. It is caught THERE rather than here
+                // so the JSON it built still comes back with it; catching here left `status`
+                // showing the previous payload.
+                (TransportResult result, string json) = await client
+                    .ReportAsync(payload, state.DeviceId, DateTimeOffset.UtcNow)
+                    .ConfigureAwait(false);
+
+                report = result;
+
+                // The payload is persisted whether or not Merlin accepted it, so `status` can
+                // always show the operator exactly what this machine tried to send.
+                return state with
+                {
+                    // Written back unconditionally: the client STARTS at the stored value, so an
+                    // untouched offset writes itself and a relearned one replaces it. The old
+                    // "zero means it learned nothing" test existed only because the client used to
+                    // start at zero, and it is wrong once the client is seeded.
+                    ClockOffsetSeconds = client.ClockOffsetSeconds,
+                    LastReportAt = result.Succeeded ? DateTimeOffset.UtcNow : state.LastReportAt,
+                    LastReportJson = json,
+                };
+            }),
+
+            // A SWAP IS WORTH A LINE EVEN ON AN UNATTENDED RUN, and the turn's own commentary is
+            // not. Nobody is watching a scheduled collection, but a replaced binary is the one
+            // thing in this process that changes the machine, and the scheduler's own log is where
+            // an operator looks for it afterwards.
+            swapLog: Console.WriteLine,
+            decisionLog: _ => { },
+
+            // NO MINIMUM INTERVAL. The agent collects, and skipping a collection to spare a
+            // download would trade the thing this machine exists to do for the thing it does on
+            // the side.
+            minimumInterval: null);
+
+        UpdateTurnResult outcome = await turn.RunAsync().ConfigureAwait(false);
+
+        switch (outcome.Status)
+        {
+            case UpdateTurnStatus.NotEnrolled:
+                Console.Error.WriteLine(
+                    "This machine has not enrolled. Run: merlin-agent enrol --server <url> --enrolment-key <key>");
                 return 1;
-            }
 
-            Console.WriteLine(result.Detail);
-            return 0;
+            case UpdateTurnStatus.RightsRefused:
+
+                // A RIGHTS FAILURE IS NOT CONTENTION, and reporting it as such is how a machine
+                // goes quiet while looking healthy: an agent started without root or SYSTEM waited
+                // out the whole timeout and then exited ZERO, collecting nothing, on every
+                // scheduled fire.
+                Console.Error.WriteLine(
+                    "merlin-agent could not take the machine lock. It must run as root (or SYSTEM "
+                    + "on Windows); nothing was collected.");
+                return 1;
+
+            case UpdateTurnStatus.Contended:
+
+                // Not being able to take it means the updater is mid-run and may be replacing this
+                // very binary. Reporting anyway would be harmless; collecting into a directory
+                // being rewritten would not. The scheduler fires again in six hours.
+                Console.Error.WriteLine(
+                    "The updater is running. Nothing was collected; the agent will try again on "
+                    + "its next scheduled run.");
+                return 0;
+
+            case UpdateTurnStatus.Replaced:
+
+                // The updater swapped merlin-agent while this run sat waiting for the lock, so the
+                // image executing here is the OLD one, already loaded into memory. Stamping a run
+                // would tell the next updater run that the NEW binary has proved itself when it has
+                // never executed: the swap mark would be dropped, recovery would short-circuit for
+                // ever, and the replaced binary could never be put back. One collection is skipped;
+                // the scheduler starts the binary that is actually on disk next interval, and that
+                // run is the only honest witness for it.
+                Console.Error.WriteLine(
+                    "This agent was replaced while it waited for the lock. Nothing was collected; "
+                    + "the new binary runs on the next scheduled collection.");
+                return 0;
+
+            case UpdateTurnStatus.TooSoon:
+
+                // Unreachable while the agent passes no minimum interval, and handled anyway. It
+                // is a live enum member that the updater already answers explicitly, and left to
+                // the arm below it would have taken the ONE path there that assumes the collection
+                // ran — printing "Report refused:" with an empty detail and exiting 1, which is a
+                // healthy machine reported as a failed run on every gated fire. That is the same
+                // shape as the rights-failure-reported-as-contention defect, arriving by a
+                // different door.
+                return 0;
+
+            default:
+
+                // BEFORE THE REPORT'S OWN EXIT CODE, because that is the order the two lines were
+                // written in and an update failure is context for the report line rather than a
+                // replacement for it.
+                if (outcome.Fault is { } fault)
+                {
+                    Console.Error.WriteLine($"  the updater check did not complete: {fault}");
+                }
+
+                // NO REPORT AT ALL IS NOT A REFUSED REPORT. Every status that stops the turn before
+                // the collection is answered above, so reaching here with nothing recorded would
+                // mean a status added later fell through — and reporting that as a refusal names a
+                // failure that did not happen. Say nothing and exit clean; the arm above is where a
+                // new member belongs.
+                if (report is null)
+                {
+                    return 0;
+                }
+
+                if (!report.Succeeded)
+                {
+                    // As above: a report that never reached Merlin was not refused by it.
+                    Console.Error.WriteLine($"Report did not complete: {report.Detail}");
+                    return 1;
+                }
+
+                Console.WriteLine(report.Detail);
+
+                return 0;
         }
     }
 
@@ -206,7 +446,32 @@ public static class Program
 
         if (state is null)
         {
-            Console.WriteLine("This machine has not enrolled.");
+            // A RIGHTS FAILURE IS NOT AN ABSENCE, and reporting it as one is how this command
+            // became misleading to the very person it was written for. The state directory is
+            // 0700 and root-owned on macOS and Linux, so an ordinary user cannot traverse it:
+            // File.Exists answers false, the read returns null, and the honest answer — "you
+            // cannot see it from here" — came out as "there is nothing here". An employee running
+            // this to check what their machine sends was told the agent was not enrolled while it
+            // was reporting perfectly well.
+            // THREE ANSWERS, NOT TWO. ReadFrom also returns null for a state file it cannot
+            // PARSE — a truncated write, a half-restored backup, a hand edit — and calling that
+            // "not enrolled" is the same lie as calling a permissions failure one, one branch
+            // over. The remedies are entirely different: run as root, re-enrol, or nothing at all.
+            Console.WriteLine(
+                StateDirectoryIsUnreadable()
+                    ? "The state directory exists but cannot be read from this account. Run this "
+                        + "as root (or as Administrator on Windows): it is restricted to the "
+                        + "superuser because the device key lives beside the state file."
+                    : File.Exists(AgentState.StatePath)
+                        ? "A state file exists but could not be read — it is most likely corrupt. "
+                            + "Re-enrol this machine to rebuild it; Merlin treats a re-enrolment "
+                            + "with the same key as the same device."
+                        : "This machine has not enrolled.");
+
+            // BOTH COMPONENTS, even here. "Not enrolled" and "the updater was never installed" are
+            // different faults with different fixes, and a machine that is silent is exactly when
+            // an operator needs to tell them apart.
+            PrintComponents();
 
             // The manifest is still worth printing: somebody deciding whether to ALLOW the agent
             // onto their machine is exactly the person who should be able to read what it would
@@ -221,7 +486,13 @@ public static class Program
         Console.WriteLine($"Reports to:  {state.ServerUrl}");
         Console.WriteLine($"Enrolled:    {state.EnrolledAt:yyyy-MM-dd HH:mm} UTC");
         Console.WriteLine($"Last report: {state.LastReportAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
-        Console.WriteLine($"Agent:       {Version}");
+
+        // BOTH COMPONENTS, always. This machine carries two scheduled binaries that replace each
+        // other, and an operator shown only one of them cannot tell a fleet that updates itself
+        // from one that stopped a version ago — which is precisely the state a missing or stale
+        // updater leaves it in.
+        PrintUpdaterStatus(state);
+
         Console.WriteLine();
 
         if (args.Contains("--manifest", StringComparer.OrdinalIgnoreCase))
@@ -243,6 +514,89 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine("Run 'merlin-agent status --manifest' to see every query this agent runs.");
         return 0;
+    }
+
+    /// <summary>
+    /// Whether the state directory is there but shut to this account.
+    /// </summary>
+    /// <remarks>
+    /// <b>Asked by TRYING, not by testing the directory's existence.</b> A directory that exists
+    /// and is readable and simply holds no state file is a machine that has not enrolled, and
+    /// saying "run as root" to that person sends them after a permission problem they do not have.
+    /// Only an enumeration that is actually refused distinguishes the two.
+    /// </remarks>
+    /// <returns><c>true</c> when the directory exists and this account cannot read it.</returns>
+    private static bool StateDirectoryIsUnreadable()
+    {
+        if (!Directory.Exists(AgentState.Directory))
+        {
+            return false;
+        }
+
+        try
+        {
+            // EAGER, and the result deliberately discarded. The refusal only surfaces when
+            // something actually reads the directory, so a lazy enumerator that is never walked
+            // would answer "readable" for a directory nobody can open.
+            _ = Directory.GetFileSystemEntries(AgentState.Directory);
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Names both installed components, with or without a state file.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>"not installed" and "would not run" are told apart</b>, because the remedies differ: the
+    /// first is a package built before auto-update shipped and is fixed by reinstalling, the second
+    /// is a broken binary that the agent itself will put back. Collapsing them into one line would
+    /// leave an operator guessing at which they are looking at.
+    /// </para>
+    /// <para>
+    /// <b>Which binaries are on this machine is a fact about the DISK, not about enrolment</b> —
+    /// and the two questions an operator brings to a machine that is not reporting are "is it
+    /// enrolled" and "did the updater ever get installed". Printing the components only after the
+    /// state file was read answered the second only when the first was already fine, which is the
+    /// case where nobody needed to ask.
+    /// </para>
+    /// </remarks>
+    private static void PrintComponents()
+    {
+        string updaterPath = InstallLayout.Current.PathOf(AgentComponent.Updater);
+
+        string updater = !File.Exists(updaterPath)
+            ? "not installed — this machine will not update itself"
+            : BinaryProbe.Default.Version(updaterPath) ?? "installed, but it would not run";
+
+        Console.WriteLine($"Agent:       {Version}");
+        Console.WriteLine($"Updater:     {updater}");
+    }
+
+    /// <summary>
+    /// Prints the companion updater's version and what the last swap on this machine did.
+    /// </summary>
+    private static void PrintUpdaterStatus(AgentStateData state)
+    {
+        PrintComponents();
+        Console.WriteLine(
+            $"Last check:  {state.LastUpdaterRunAt?.ToString("yyyy-MM-dd HH:mm") ?? "never"} UTC");
+
+        if (state.LastUpdateOutcome is { } outcome)
+        {
+            Console.WriteLine($"Last update: {outcome} at {state.LastUpdateAt:yyyy-MM-dd HH:mm} UTC");
+
+            if (state.LastUpdateDetail is { Length: > 0 } detail)
+            {
+                Console.WriteLine($"             {detail}");
+            }
+        }
     }
 
     private static int PrintManifest()
@@ -310,6 +664,22 @@ public static class Program
     /// </remarks>
     private static async Task<int> SetServerAsync(string[] args)
     {
+        // THE SAME MACHINE-WIDE LOCK the scheduled commands take, and for the same reason: this
+        // reads state, does network work, and writes state back. Without it an operator running
+        // this while the updater happens to be mid-swap persists a pre-image and erases the swap
+        // mark, which is a broken binary that can never be put back.
+        using MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied);
+
+        if (machineLock is null)
+        {
+            Console.Error.WriteLine(accessDenied
+                ? "merlin-agent could not take the machine lock. It must run as root (or SYSTEM on "
+                    + "Windows); nothing was done."
+                : "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            return 1;
+        }
+
         AgentStateData? state = AgentState.Read();
 
         if (state is null)
@@ -332,6 +702,8 @@ public static class Program
             Console.Error.WriteLine($"'{server}' is not an absolute http or https address.");
             return 1;
         }
+
+        WarnIfPlaintext(server);
 
         if (string.Equals(server.TrimEnd('/'), state.ServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
         {
@@ -398,6 +770,22 @@ public static class Program
     /// </remarks>
     private static async Task<int> RotateAsync()
     {
+        // THE SAME MACHINE-WIDE LOCK the scheduled commands take, and for the same reason: this
+        // reads state, does network work, and writes state back. Without it an operator running
+        // this while the updater happens to be mid-swap persists a pre-image and erases the swap
+        // mark, which is a broken binary that can never be put back.
+        using MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied);
+
+        if (machineLock is null)
+        {
+            Console.Error.WriteLine(accessDenied
+                ? "merlin-agent could not take the machine lock. It must run as root (or SYSTEM on "
+                    + "Windows); nothing was done."
+                : "The agent or the updater is running. Nothing was changed; try again in a moment.");
+            return 1;
+        }
+
         AgentStateData? state = AgentState.Read();
 
         if (state is null)
@@ -428,15 +816,19 @@ public static class Program
                 Convert.ToBase64String(incoming.ExportSubjectPublicKeyInfo()),
                 KeyAttestation.Software.ToString());
 
-            using ReportClient client = new(state.ServerUrl, outgoing, Version);
+            using ReportClient client = new(
+                state.ServerUrl, outgoing, Version, state.ClockOffsetSeconds);
 
             TransportResult result = await client
-                .RotateAsync(request, state.DeviceId, DateTimeOffset.UtcNow.AddSeconds(state.ClockOffsetSeconds))
+                .RotateAsync(request, state.DeviceId, DateTimeOffset.UtcNow)
                 .ConfigureAwait(false);
 
             if (!result.Succeeded)
             {
-                Console.Error.WriteLine($"Rotation refused: {result.Detail}");
+                // NOT "refused" — an unreachable Merlin never got the chance to refuse anything,
+                // and this codebase draws exactly that distinction everywhere else. The detail line
+                // says which it was; the headline should not assert a decision nobody made.
+                Console.Error.WriteLine($"Rotation did not complete: {result.Detail}");
                 Console.Error.WriteLine("The existing key is unchanged and this machine keeps reporting.");
                 return 1;
             }
@@ -450,8 +842,31 @@ public static class Program
 
     private static int Uninstall()
     {
-        DeviceKey.Delete(AgentState.SoftwareKeyPath);
-        AgentState.Delete();
+        // UNDER THE LOCK, like every other command that writes state. Without it an uninstall
+        // racing a mid-swap updater is undone by that updater's closing AgentState.Write, which
+        // RESURRECTS state.json — pointing at a device whose key has just been deleted. The next
+        // collect then creates a fresh key and every report from that machine is refused for ever,
+        // which is a considerably worse end state than a failed uninstall.
+        using (MachineLock? machineLock = MachineLock.TryAcquire(
+            AgentState.Directory, UpdateTurn.LockWait, out bool accessDenied))
+        {
+            if (machineLock is null)
+            {
+                Console.Error.WriteLine(accessDenied
+                    ? "merlin-agent could not take the machine lock. It must run as root (or "
+                        + "SYSTEM on Windows); nothing was removed."
+                    : "The agent or the updater is running. Nothing was removed; try again in a "
+                        + "moment.");
+                return 1;
+            }
+
+            DeviceKey.Delete(AgentState.SoftwareKeyPath);
+            AgentState.Delete();
+        }
+
+        // Only once the lock is released, or the file being removed is the one still held.
+        TryRemove(MachineLock.PathIn(AgentState.Directory));
+        TryRemoveDirectory(InstallLayout.Current.StagingDirectory);
 
         Console.WriteLine("Local agent state and signing key removed.");
         Console.WriteLine(
@@ -459,6 +874,36 @@ public static class Program
             + "the machine is being decommissioned.");
 
         return 0;
+    }
+
+    private static void TryRemove(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Uninstall reports what it removed; a leftover lock file is inert and harmless.
+        }
+    }
+
+    private static void TryRemoveDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // As above: a leftover staging tree is litter, not a failure worth reporting.
+        }
     }
 
     /// <summary>
@@ -471,6 +916,14 @@ public static class Program
     /// </remarks>
     private static AgentReportPayload Collect()
     {
+        // ONE DEADLINE FOR THE WHOLE COLLECTION, created before the first external process and
+        // shared by every phase. All of this runs while the agent holds the machine-wide lock, and
+        // the updater gives that lock two minutes before it reports contention and leaves — so a
+        // collection that outlasts the wait is a window in which nothing on this machine can put a
+        // broken agent back. Bounding one phase is what makes that property look established
+        // without establishing it.
+        CollectionDeadline deadline = new();
+
         string? osquery = OsqueryRunner.Locate();
         OsqueryResults results;
         string? osqueryVersion = null;
@@ -488,7 +941,7 @@ public static class Program
         }
         else
         {
-            OsqueryRunner runner = new(osquery, TimeSpan.FromSeconds(30));
+            OsqueryRunner runner = new(osquery, TimeSpan.FromSeconds(30), deadline);
             osqueryVersion = runner.Version();
 
             results = runner.RunAll(
@@ -505,7 +958,7 @@ public static class Program
             _ => LinuxNormaliser.ToPayload(results, now, Version, osqueryVersion),
         };
 
-        return HostReader.Read().MergeInto(payload);
+        return HostReader.Read(deadline).MergeInto(payload);
     }
 
     private static string? ArgumentValue(string[] args, string name)

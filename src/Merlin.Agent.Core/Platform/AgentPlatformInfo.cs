@@ -1,6 +1,6 @@
 using Merlin.Agent.Core.Contracts;
 
-namespace Merlin.Agent.Platform;
+namespace Merlin.Agent.Core.Platform;
 
 /// <summary>Which operating system this process is running on.</summary>
 public enum AgentOs

@@ -6,7 +6,9 @@ so that agreement between them is checkable by reading them side by side:
 - client — `src/Merlin.Agent.Core/Crypto/AgentSignature.cs` (this repository)
 - server — `Merlin.Endpoints.Application.Services.AgentSignature` (the Merlin repository)
 
-Frozen vectors for the canonical strings live in `tests/Merlin.Agent.Core.Tests/AgentSignatureTests.cs`.
+Frozen vectors for the report and enrol canonical strings live in
+`tests/Merlin.Agent.Core.Tests/AgentSignatureTests.cs`; the update one is in
+`tests/Merlin.Agent.Core.Tests/UpdateGuardTests.cs`.
 **If either side is "tidied" — a separator changed, a field reordered, a timestamp reformatted —
 every agent in the field stops being able to report.** Those tests are what makes that a build
 failure rather than a production outage.
@@ -45,15 +47,17 @@ Every request carries these headers:
 | `Merlin-Nonce` | 128 bits, Base64Url |
 | `Merlin-Signature` | Base64, ECDSA P-256 / SHA-256, IEEE P1363 (fixed 64-byte r‖s) |
 | `Merlin-Agent-Version` | semver |
+| `Merlin-Agent-Rid` | this machine's runtime identifier. **Update check only.** |
 
 ### The canonical string
 
 ```
 report / rotate:   deviceId  \n  timestamp  \n  nonce  \n  sha256hex(body)
 enrol:             "enrol"   \n  timestamp  \n  nonce  \n  sha256hex(body)
+update:            "update"  \n  deviceId   \n  timestamp  \n  nonce  \n  rid
 ```
 
-Joined with `\n` (0x0A). Signed as UTF-8. Three properties are load-bearing:
+Joined with `\n` (0x0A). Signed as UTF-8. Four properties are load-bearing:
 
 **The body hash is over the RAW BYTES.** The agent hashes exactly the bytes it is about to send; the
 server hashes exactly the bytes it received. No JSON canonicalisation is involved anywhere. Any
@@ -66,7 +70,16 @@ a re-rendered timestamp would let two correct implementations disagree about whe
 
 **The device id is bound in.** A signature captured from one device cannot be replayed against
 another's endpoint. Enrolment uses a fixed context label in its place, which also domain-separates
-the two signature kinds.
+the signature kinds — and the update check carries BOTH, so an update-check signature can never be
+presented as a report signature for a device whose id happened to be the literal `update`.
+
+**The update check has no body hash and signs the runtime identifier instead.** It is a `GET`, so
+there is nothing to hash; and the runtime identifier decides which architecture's binary is
+advertised, so leaving it outside the signature would let anything between the machine and Merlin
+change which package the machine is pointed at. Where the machine's architecture is one nothing is
+built for, the field is signed as an EMPTY string rather than omitted — the server joins
+`rid ?? ""`, so a missing field would produce a string it cannot reconstruct and the machine would
+be refused instead of told there is nothing for it.
 
 ---
 
@@ -124,7 +137,89 @@ than three that can drift apart:
 | `hardening.secureBootEnabled` | UEFI Secure Boot | System Integrity Protection | UEFI Secure Boot |
 | `hardening.tpmPresent` | TPM present and enabled | Apple Secure Enclave | TPM present |
 
+Two further fields are about the agent itself rather than the machine:
+
+| Field | Meaning |
+|---|---|
+| `updaterVersion` | the companion updater's version, or `null` when it is absent or would not run |
+| `lastUpdateOutcome` | `Succeeded`, `Failed`, `Reverted`, or `null` when nothing has been attempted |
+
+**The outcome is REPORTED, never inferred.** A server watching only `agentVersion` cannot tell
+"updated and rolled back" from "never attempted", because both leave the version unmoved — and a
+silent failed update is the worst thing auto-update can produce. `Reverted` is deliberately distinct
+from `Failed`: a revert means a bad binary reached the machine and was survived, which is the case a
+staged rollout exists to catch.
+
+`Failed` is the broader of the two and covers **four** situations that read very differently on a
+device page.
+
+1. **Nothing was replaced at all** — a download failure, a hash mismatch, a refused host, a staged
+   binary that would not execute. The machine is still on what it had, the next scheduled run tries
+   again, and nobody need do anything.
+2. **A replacement was abandoned part-way through the move.** The current binary was moved aside,
+   the staged one could not be moved in, and the retained one could not be put back — so there is
+   no binary at the target path and the working one is stranded beside it, at `<name>.previous`.
+   No swap mark is written for a move that never completed, so automatic recovery does not run.
+   From the payload this is indistinguishable from case 1, and it is the reason this list is not
+   just "it failed, it will retry".
+3. **Something is installed that nothing ever ran.** Not a lost binary and not a bad release: the
+   component is present and has never started, which on the upgrade path from any release predating
+   the updater means its scheduled task, launch daemon or systemd timer was never created. This is
+   the one an operator can act on without publishing anything — and because the missing schedule
+   arrives with the upgrade, it is normally fleet-wide rather than one machine.
+4. **A component was replaced and cannot be put back** — it has not run since, and either could not
+   be restored or had no retained binary to restore. That case is the worst state this design
+   admits.
+
+**The four are NOT distinguishable from this payload, and a server must not be built as though
+they are.** The agent records a sentence naming which it was, but it keeps it locally — it is
+what `merlin-agent status` prints, and it does not cross the wire; the report carries the outcome
+and nothing else. So `Failed` means "the last attempt did not succeed", and telling a machine that
+merely failed to download from one that was left with no working binary needs the device itself.
+What narrows them without asking the machine is CORROBORATING evidence this payload already
+carries — the version of the component that failed. A `Failed` whose `agentVersion` has not moved
+and whose reports then stop is case 4. When it is the UPDATER that failed the agent keeps reporting
+normally, so `agentVersion` says nothing; `updaterVersion` is the field that shows it, and it is
+null when the updater is absent or will not run. Widening the payload is possible, but it is a wire
+change and is deliberately not made here.
+
 **202** on acceptance.
+
+## `GET /api/agent/update`
+
+The only READ on this surface, and the only thing Merlin ever says to a machine that looks
+unprompted. Device-signed with the `update` canonical string above, no body, and it changes nothing
+about the device.
+
+**200** — the version this device should be running:
+
+```json
+{ "version": "0.3.0", "packageEndpoint": "https://github.com/…/merlin-agent-win-x64.zip",
+  "sha256": "…" }
+```
+
+**A version, an address and a hash. Nothing else, ever.** There is no verb, no arguments, no path,
+no script and nothing the machine dispatches on. The moment the response can say anything except
+"the version you should be running is X, here, with this hash", this is a remote-command channel
+wearing a different hat — which the agent does not have and is not getting.
+
+**204** — nothing to do. The machine is already where it should be, its rollout ring is not due yet,
+or the deployment has named no version at all. **This is the ORDINARY answer and is never an
+error.** Treating it as one would have a healthy fleet reporting a broken update every day.
+
+**404** — this deployment does not offer updates: an older Merlin, or the agent surface switched
+off. The machine keeps reporting exactly as before.
+
+The agent applies two guards to whatever comes back, and neither is negotiable:
+
+- **A compile-time host allowlist**, checked before a single byte is fetched and re-checked on the
+  final address after redirects. Merlin has its own allowlist, but that catches a typo and nothing
+  else — whoever can set `packageEndpoint` can set the server's allowlist beside it. Baking the list
+  into the binaries is what means **server configuration alone cannot redirect a fleet**. It pins
+  the distribution channel where a signature would pin the publisher, and is weaker than signing.
+- **The staged binary is EXECUTED once before the running one is replaced.** A digest proves the
+  bytes arrived intact and says nothing about whether they run on this machine; a quarantine, a
+  wrong architecture and a missing library all fail here, with the working binary still in place.
 
 ## `POST /api/agent/rotate`
 
@@ -151,7 +246,11 @@ is logged and audited server-side.
 
 `serverTime` is the one thing safely returned: a machine with a wrong clock cannot otherwise
 discover why it is refused, and it reveals nothing that the HTTP `Date` header does not. The agent
-applies the offset and retries once when the difference exceeds 30 seconds.
+retries once, having relearned its offset, when the correction `serverTime` implies differs by at
+least 30 seconds from the one it is ALREADY applying — which is the test that lets a machine both
+acquire a correction and, once its clock is fixed, give one up. Comparing the implied correction
+against zero instead would leave a machine that has corrected its clock stamping the old offset for
+ever, refused every time, with nothing on the machine able to clear it.
 
 **404** means the deployment does not have the agent surface switched on.
 
@@ -161,11 +260,40 @@ applies the offset and retries once when the difference exceeds 30 seconds.
 
 | | Default |
 |---|---|
-| Timestamp skew tolerance | ±300 s |
+| Timestamp skew tolerance | ±300 s — **must stay above the agent's 30 s learn threshold** (below it, there is a band where the server refuses and the agent declines to relearn, which no run can climb out of) |
+| Largest clock correction an agent will adopt | ±100 years — the bound exists to keep the correction REPRESENTABLE, not to judge how wrong a clock may be. A machine whose clock never had the right time (a dead CMOS battery, a board with no RTC) is decades out and must still be correctable; a `serverTime` near the end of the representable range implies millennia and would make every later request throw before it was built |
 | Nonce cache window | the skew tolerance |
 | Maximum body | 256 KB |
 | Report cadence | every 6 h, jittered |
+| Update-check cadence | the updater daily, jittered by up to 2 h; the agent on every collection |
+| Minimum gap between scheduled updater checks | 1 h — `run --now` bypasses it |
+| Minimum gap between agent update checks | none, deliberately: a collection is never skipped to spare a download |
+| Maximum length of one collection | 100 s, shared across the version probe, the query pack and the host readings — plus up to 10 s of pipe drain for a step killed at the deadline |
+| Maximum entries in a package archive | 512 |
+| Maximum size of an extracted package entry | 256 MB |
+| Maximum package archive | 256 MB |
+| Silence before a replaced agent is put back | 24 h — four missed collections |
+| Silence before a replaced updater is put back | 72 h — three missed checks |
+| Corroboration required before either is put back | one completed run by the OTHER component, after the swap |
 | Enrolment key lifetime | 30 days |
+
+**A component that was replaced and has not run since is not replaced AGAIN**, however far behind
+it is. Stacking an unproven swap on an unproven one restarts the window a revert is timed from, so
+the revert never fires; and only the immediately preceding binary is retained, so the second swap
+overwrites the last copy known to have worked and leaves recovery restoring something that never
+ran either. An antivirus engine that quarantines the installed binary but not the freshly
+downloaded one produces exactly this, daily and for ever. The rule is what keeps the retained
+binary one that has actually executed on this machine.
+
+**A window on its own is not evidence, because wall clock passes while a laptop is shut.** A
+machine closed straight after a swap comes back with the window long expired and the replaced
+binary — which is perfectly good — never having run, which is indistinguishable from a broken one.
+So a revert also requires that the component asking the question completed a run of its OWN after
+the swap: that is what says the machine was actually up while the other one stayed silent. It costs
+up to one extra updater run before a genuinely broken agent is put back, and a few hours the other
+way round since the agent runs four times as often. The alternative is worse than slow: a revert
+records the version it undid and that version is never installed on that device again, so a false
+revert strands the machine a version behind until somebody re-pins it by hand.
 
 Replay defence is **timestamp plus nonce, not a counter.** A monotonic counter was rejected because
 an agent that loses its state file but keeps its TPM key would restart at zero and be refused

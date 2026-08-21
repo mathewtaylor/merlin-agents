@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Merlin.Agent.Platform;
+using Merlin.Agent.Core.Platform;
 
 namespace Merlin.Agent.Collection;
 
@@ -17,17 +17,27 @@ namespace Merlin.Agent.Collection;
 public static class QueryPack
 {
     /// <summary>Loads the manifest for the platform this agent is running on.</summary>
-    /// <returns>Query name to SQL, in manifest order.</returns>
+    /// <returns>Query name and SQL, in manifest order.</returns>
     /// <exception cref="FileNotFoundException">When the manifest is missing.</exception>
     /// <exception cref="InvalidOperationException">When the manifest cannot be parsed.</exception>
-    public static IReadOnlyDictionary<string, string> Load() => Load(AgentPlatformInfo.QueryPackName);
+    public static IReadOnlyList<KeyValuePair<string, string>> Load() => Load(AgentPlatformInfo.QueryPackName);
 
     /// <summary>Loads a named manifest from beside the executable.</summary>
+    /// <remarks>
+    /// <b>An ordered LIST, because the order is load-bearing and a dictionary does not promise
+    /// one.</b> A collection is bounded, so whatever has not run when the bound is reached is
+    /// reported as not observed — which makes manifest order the order in which readings are
+    /// sacrificed, and the packs are written security-posture first for exactly that reason.
+    /// <c>Dictionary&lt;TKey, TValue&gt;</c> documents its enumeration order as undefined; it
+    /// happens to be insertion order today, and stops being so after a single <c>Remove</c> or a
+    /// switch to <c>FrozenDictionary</c>. Returning a list makes the guarantee something the type
+    /// keeps rather than something a comment asserts.
+    /// </remarks>
     /// <param name="fileName">The manifest file name, e.g. <c>macos.json</c>.</param>
-    /// <returns>Query name to SQL, in manifest order.</returns>
+    /// <returns>Query name and SQL, in manifest order.</returns>
     /// <exception cref="FileNotFoundException">When the manifest is missing.</exception>
     /// <exception cref="InvalidOperationException">When the manifest cannot be parsed.</exception>
-    public static IReadOnlyDictionary<string, string> Load(string fileName)
+    public static IReadOnlyList<KeyValuePair<string, string>> Load(string fileName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
 
@@ -50,13 +60,13 @@ public static class QueryPack
                 "The collection manifest contains no queries. Reinstall the agent.");
         }
 
-        Dictionary<string, string> queries = new(StringComparer.Ordinal);
+        List<KeyValuePair<string, string>> queries = [];
 
         foreach ((string name, QueryPackEntry entry) in pack.Queries)
         {
             if (!string.IsNullOrWhiteSpace(entry.Sql))
             {
-                queries[name] = entry.Sql;
+                queries.Add(new KeyValuePair<string, string>(name, entry.Sql));
             }
         }
 
@@ -71,7 +81,12 @@ public sealed record QueryPackFile(int Version, Dictionary<string, QueryPackEntr
 
 /// <summary>One manifest entry.</summary>
 /// <param name="Sql">The osquery SQL.</param>
-/// <param name="Purpose">Why it is collected — shown by <c>merlin-agent status --manifest</c>.</param>
+/// <param name="Purpose">
+/// Why it is collected. <b>Read by a person opening the manifest, not by this agent</b> — it is
+/// deliberately not loaded or printed, because the thing <c>status --manifest</c> exists to show
+/// is the SQL that actually runs, and a rationale printed beside it invites reading the rationale
+/// instead of the query.
+/// </param>
 public sealed record QueryPackEntry(string? Sql, string? Purpose);
 
 /// <summary>Source-generated JSON context for the manifest.</summary>

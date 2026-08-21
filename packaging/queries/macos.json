@@ -4,13 +4,13 @@
     "",
     "THIS FILE IS THE COMPLETE LIST OF WHAT THE AGENT READS ON macOS. Every query below runs",
     "through osqueryi and nothing else is collected. An administrator can paste any of them into",
-    "osqueryi on their own Mac and get byte-identical output — which is a far stronger assurance",
+    "osqueryi on their own Mac and get byte-identical output \u2014 which is a far stronger assurance",
     "than reading the agent's source, and is the main reason collection is delegated to osquery",
     "rather than hand-rolled.",
     "",
     "NOTHING HERE READS WHO IS SIGNED IN. There is no query for the console user, the session or",
     "any mail address. The `screenlock` query is the one place a per-user setting is even nearby,",
-    "and osquery resolves it internally without ever returning a username — see its own comment.",
+    "and osquery resolves it internally without ever returning a username \u2014 see its own comment.",
     "",
     "macOS EXPOSES LESS AT MACHINE SCOPE THAN WINDOWS DOES, and the gaps are left as gaps. The",
     "screen-lock idle interval, patch currency and antimalware signature age have no machine-wide",
@@ -18,22 +18,21 @@
     "observed. A query that guessed at them would be worse than the silence.",
     "",
     "A query that fails or returns nothing produces a NULL reading, never a false one. Merlin",
-    "treats null as 'not observed' and will not raise a nonconformity from it."
+    "treats null as 'not observed' and will not raise a nonconformity from it.",
+    "",
+    "QUERIES RUN IN THE ORDER LISTED HERE, AND THE ORDER IS DELIBERATE. A collection is bounded so",
+    "it cannot hold the machine lock past the point where the updater gives up waiting for it, and",
+    "on a machine where osquery answers slowly that bound is reached before the end of this list.",
+    "Whatever is left is reported as NOT OBSERVED, so the security-posture queries come first and",
+    "the inventory ones last: losing a hostname degrades a device page, while losing disk encryption",
+    "or the firewall loses the reading the ISMS exists to take."
   ],
   "version": 1,
   "queries": {
-    "system_info": {
-      "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model, cpu_brand FROM system_info;",
-      "purpose": "Machine identity, the serial used to reconcile against the asset register, and the CPU brand that establishes whether this Mac has a Secure Enclave."
-    },
-    "os_version": {
-      "sql": "SELECT name, version, build, platform FROM os_version;",
-      "purpose": "macOS name, version and build — what end-of-support is judged against."
-    },
     "filevault": {
       "$comment": [
-        "A PRIVACY-CRITICAL QUERY. The disk_encryption table also carries `uid` and `user_uuid` —",
-        "'currently authenticated user if available' — which identify the person who unlocked the",
+        "A PRIVACY-CRITICAL QUERY. The disk_encryption table also carries `uid` and `user_uuid` \u2014",
+        "'currently authenticated user if available' \u2014 which identify the person who unlocked the",
         "volume. This query names exactly the columns it wants, so those are never returned to the",
         "agent at all: the restriction is enforced by the query rather than by the agent",
         "remembering to ignore them, the same way the Windows pack restricts the Entra join info.",
@@ -50,7 +49,7 @@
     },
     "gatekeeper": {
       "sql": "SELECT assessments_enabled FROM gatekeeper;",
-      "purpose": "Whether Gatekeeper refuses unsigned and un-notarised code — macOS's malware-prevention control (A.8.7). Signature currency is NOT collected: XProtect updates through a channel with no locally readable 'current' version to compare against."
+      "purpose": "Whether Gatekeeper refuses unsigned and un-notarised code \u2014 macOS's malware-prevention control (A.8.7). Signature currency is NOT collected: XProtect updates through a channel with no locally readable 'current' version to compare against."
     },
     "alf": {
       "sql": "SELECT global_state FROM alf;",
@@ -58,12 +57,12 @@
     },
     "sip": {
       "sql": "SELECT enabled FROM sip_config WHERE config_flag = 'sip';",
-      "purpose": "System Integrity Protection — macOS's verified-boot equivalent, reported as the Secure Boot signal."
+      "purpose": "System Integrity Protection \u2014 macOS's verified-boot equivalent, reported as the Secure Boot signal."
     },
     "screenlock": {
       "$comment": [
         "THE PRIVACY-SENSITIVE QUERY. Whether the screen requires a password is a per-user",
-        "preference, and osquery resolves the console user's setting internally — this table",
+        "preference, and osquery resolves the console user's setting internally \u2014 this table",
         "returns only `enabled` and `grace_period`, with no username, uid or session in its",
         "output. The agent therefore never handles an identity even though the value originates",
         "in a user's own domain.",
@@ -76,6 +75,10 @@
       "sql": "SELECT enabled, grace_period FROM screenlock;",
       "purpose": "Whether unlocking this Mac requires a password (A.7.7 clear screen). Expect NO ROWS in normal operation: osquery reads this from the current logged-in user context, and the agent runs as root from a launch daemon which has none. That is why Merlin usually shows this signal as not observed on a Mac."
     },
+    "secure_enclave": {
+      "sql": "SELECT cpu_brand FROM system_info;",
+      "purpose": "The CPU brand, which establishes whether this Mac has a Secure Enclave \u2014 the only hardware-security-processor signal macOS exposes. Split out of `system_info` so it runs with the posture queries rather than being discarded with inventory on a slow machine."
+    },
     "local_admins": {
       "$comment": [
         "Returns LOCAL ACCOUNT names, not the identity of whoever is signed in. A.8.2 is",
@@ -85,9 +88,17 @@
       "sql": "SELECT u.username FROM users u JOIN user_groups ug ON u.uid = ug.uid JOIN groups g ON ug.gid = g.gid WHERE g.groupname = 'admin';",
       "purpose": "Local accounts holding administrator rights (A.8.2)."
     },
+    "os_version": {
+      "sql": "SELECT name, version, build, platform FROM os_version;",
+      "purpose": "macOS name, version and build \u2014 what end-of-support is judged against."
+    },
     "system_volume": {
       "sql": "SELECT blocks, blocks_available, blocks_size FROM mounts WHERE path = '/';",
       "purpose": "Free space on the system volume (A.8.6 capacity)."
+    },
+    "system_info": {
+      "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model FROM system_info;",
+      "purpose": "Machine identity, and the serial used to reconcile against the asset register."
     }
   }
 }

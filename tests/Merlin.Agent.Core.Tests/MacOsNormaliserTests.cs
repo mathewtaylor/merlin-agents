@@ -161,17 +161,27 @@ public sealed class MacOsNormaliserTests
     [Fact]
     public void AppleSiliconReportsASecureEnclaveAndIntelReportsNothing()
     {
+        // FROM `secure_enclave`, NOT `system_info`. This is macOS's only hardware-security-processor
+        // signal and it used to be read out of the inventory query that runs last, so a machine that
+        // exhausted its collection budget dropped this reading before its hostname.
         OsqueryResults apple = new();
-        apple.Add("system_info", [Row(("cpu_brand", "Apple M3 Pro"))]);
+        apple.Add("secure_enclave", [Row(("cpu_brand", "Apple M3 Pro"))]);
 
         OsqueryResults intel = new();
-        intel.Add("system_info", [Row(("cpu_brand", "Intel(R) Core(TM) i7-9750H CPU"))]);
+        intel.Add("secure_enclave", [Row(("cpu_brand", "Intel(R) Core(TM) i7-9750H CPU"))]);
 
         Assert.True(Build(apple).Hardening?.TpmPresent);
 
         // Never `false`: an Intel Mac may well have a T2, and no table exposes it. Asserting its
         // absence would fail a machine that has one.
         Assert.Null(Build(intel).Hardening?.TpmPresent);
+
+        // And the query it was split OUT of no longer answers for it — otherwise the split would be
+        // cosmetic and the reading would still be lost with inventory.
+        OsqueryResults inventoryOnly = new();
+        inventoryOnly.Add("system_info", [Row(("cpu_brand", "Apple M3 Pro"))]);
+
+        Assert.Null(Build(inventoryOnly).Hardening?.TpmPresent);
     }
 
     [Fact]

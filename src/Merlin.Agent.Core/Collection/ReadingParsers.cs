@@ -133,4 +133,63 @@ public static class ReadingParsers
 
         return names.Count == 0 ? null : names;
     }
+
+    /// <summary>
+    /// Decides a TPM reading from the three things Linux sysfs can be asked about it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The absence of the device node is only an OBSERVED absence when sysfs is itself
+    /// visible</b>, and that third input is the whole reason this is a function rather than two
+    /// lines at the call site. <c>Directory.Exists</c> RETURNS FALSE — it does not throw — for a
+    /// path it cannot stat, so a caller that asks only about <c>tpm0</c> cannot tell "the kernel
+    /// bound no TPM" from "there is no <c>/sys</c> here to look in", and reports the first for
+    /// both. On a machine with no sysfs mounted — a container, a chroot, a lockdown environment —
+    /// that is a positive assertion that the machine has no security processor, made about a node
+    /// nobody could have read. It is the defect this file's own opening rule names: never a
+    /// default, never a <c>false</c>.
+    /// </para>
+    /// <para>
+    /// <b>Asked as ONE reading, not two.</b> The flag and the version string are two halves of one
+    /// observation; deriving them from independent probes lets them disagree and report a TPM that
+    /// is present with no version, or a version for a machine reported as having no TPM.
+    /// </para>
+    /// </remarks>
+    /// <param name="versionMajor">
+    /// The contents of <c>tpm0/tpm_version_major</c>, or <c>null</c> when it could not be read —
+    /// which, per <c>CommandRunner.ReadFile</c>, means absent OR refused and so decides nothing on
+    /// its own.
+    /// </param>
+    /// <param name="deviceNodeVisible">Whether <c>/sys/class/tpm/tpm0</c> could be seen.</param>
+    /// <param name="sysfsVisible">
+    /// Whether <c>/sys/class</c> — the sysfs class enumeration point — could be seen. When it could
+    /// not, nothing whatever was established and the answer is <c>null</c>. <b>NOT
+    /// <c>/sys/class/tpm</c>:</b> that directory is itself absent when no TPM driver ever
+    /// registered, so passing it would collapse the ordinary no-TPM answer on a virtual machine or
+    /// an older board from a true <c>false</c> into "not observed", losing a real reading.
+    /// </param>
+    /// <returns>Whether a TPM is present, and its major version when that could be read.</returns>
+    public static (bool? Present, string? Version) TpmFromSysfs(
+        string? versionMajor,
+        bool deviceNodeVisible,
+        bool sysfsVisible)
+    {
+        // A version we could read is proof of presence on its own, whatever the directory says.
+        if (!string.IsNullOrWhiteSpace(versionMajor))
+        {
+            return (true, versionMajor.Trim());
+        }
+
+        // A node that exists whose version we could not read is a TPM we can see and cannot
+        // describe: present, version unknown.
+        if (deviceNodeVisible)
+        {
+            return (true, null);
+        }
+
+        // No node, but sysfs is there to be read — the ordinary answer on a virtual machine or an
+        // older board, and a true reading that would be lost by calling it unknown. Without sysfs
+        // in view, nothing whatever was established.
+        return sysfsVisible ? (false, null) : (null, null);
+    }
 }

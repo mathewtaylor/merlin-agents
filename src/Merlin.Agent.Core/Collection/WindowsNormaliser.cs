@@ -116,7 +116,7 @@ public static class WindowsNormaliser
             return null;
         }
 
-        bool isHome = IsHomeEdition(edition);
+        bool? isHome = IsHomeEdition(edition);
         List<AgentVolumeReading> volumes = [];
 
         foreach (Dictionary<string, string> row in rows)
@@ -133,13 +133,25 @@ public static class WindowsNormaliser
             }
             else if (protection == 1)
             {
-                method = isHome ? DiskEncryptionMethod.DeviceEncryption : DiskEncryptionMethod.BitLocker;
+                // The volume IS encrypted whichever edition this is, and that is the fact the
+                // control turns on — an unknown edition costs the MECHANISM's name, not the
+                // reading, so it is named for the ordinary case rather than discarded.
+                method = isHome is true
+                    ? DiskEncryptionMethod.DeviceEncryption
+                    : DiskEncryptionMethod.BitLocker;
             }
             else
             {
-                method = isHome
-                    ? DiskEncryptionMethod.NotSupportedOnEdition
-                    : DiskEncryptionMethod.None;
+                // AN UNKNOWN EDITION MUST NOT GRADE. Unprotected on Home is a licensing fact and
+                // unprotected on Pro is somebody switching it off; only the second is a finding.
+                // Without knowing which, asserting either is a guess, and one of the two guesses
+                // raises a nonconformity against a machine that cannot comply.
+                method = isHome switch
+                {
+                    true => DiskEncryptionMethod.NotSupportedOnEdition,
+                    false => DiskEncryptionMethod.None,
+                    null => DiskEncryptionMethod.NotObserved,
+                };
             }
 
             volumes.Add(new AgentVolumeReading(
@@ -164,11 +176,17 @@ public static class WindowsNormaliser
     /// friendly product name ("Windows 11 Home") is also accepted because some machines report the
     /// caption here instead.
     /// </remarks>
-    private static bool IsHomeEdition(string? edition)
+    private static bool? IsHomeEdition(string? edition)
     {
+        // UNREAD IS NOT "NOT HOME". Returning false here made a missing edition indistinguishable
+        // from a Pro machine, and the caller grades an unprotected volume on Pro as somebody having
+        // switched encryption off. So a collection that ran out of budget before reaching
+        // `os_edition` — or one where that query simply returned nothing — raised a nonconformity
+        // against a Home laptop that cannot encrypt at all, which is the exact harm the remarks
+        // above describe and the reason the naive name check was rejected.
         if (string.IsNullOrWhiteSpace(edition))
         {
-            return false;
+            return null;
         }
 
         string value = edition.Trim();

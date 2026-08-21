@@ -1,0 +1,777 @@
+using Merlin.Agent.Core;
+using Merlin.Agent.Core.Contracts;
+using Merlin.Agent.Core.State;
+using Merlin.Agent.Core.Update;
+using Xunit;
+
+namespace Merlin.Agent.Core.Tests;
+
+/// <summary>
+/// Tests for one component's whole update turn.
+/// </summary>
+/// <remarks>
+/// <b>The decision table is the feature.</b> The swap itself is a file move; what decides whether a
+/// fleet updates itself, sits still, or oscillates between a broken binary and a working one is
+/// this class — and every branch of it runs unattended on a machine nobody is watching.
+/// </remarks>
+public sealed class UpdateRunnerTests
+{
+    private static readonly DateTimeOffset _now = new(2026, 8, 20, 3, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task NothingToDoIsNotAnError()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "agent");
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            Enrolled(),
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting(AgentVersionInfo.Current));
+
+        // 204 is the ORDINARY answer: already current, ring not due, or no version configured.
+        // Recording a failure for it would have a healthy fleet reporting a broken update daily.
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Equal("agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task AServerWithNoUpdateEndpointChangesNothing()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "agent");
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            Enrolled(),
+            Answering(new UpdateCheck(
+                UpdateCheckStatus.NotOffered, null, "no update surface", 0)),
+            UpdateTestKit.ProbeReporting("0.2.0"));
+
+        // An older Merlin, or one with the agent surface switched off. The machine keeps reporting
+        // exactly as before; a 404 is not a failure and must never be recorded as one.
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Equal("agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task AnAdvertisedVersionMovesTheTargetAndNotesTheCallersOwnBinary()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "old agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            Enrolled(),
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            kit.ProbeInstalledAndStaged("0.2.0", "9.9.9"),
+            archive);
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, after.LastUpdateOutcome);
+        Assert.Equal("new agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+        Assert.Equal(_now, after.AgentSwappedAt);
+        Assert.Equal("9.9.9", after.AgentVersionInstalled);
+
+        // THE PENDING NOTE. Merlin stops advertising the moment the device reports the desired
+        // agent version, so this run is the last one that will ever know what it is — and the
+        // updater, which cannot replace itself, would otherwise be stranded a version behind
+        // forever.
+        Assert.Equal(AgentComponent.Updater, after.PendingComponent);
+        Assert.Equal("9.9.9", after.PendingVersion);
+    }
+
+    [Fact]
+    public async Task ThePendingNoteIsHonouredWhenTheServerHasGoneQuiet()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "old updater");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        // The version the agent is ALREADY on — which is exactly why Merlin has gone quiet. Once
+        // the device reports the desired agent version the advertisement stops for good, and an
+        // updater still a version behind would never hear about it again.
+        string desired = AgentVersionInfo.Current;
+
+        AgentStateData state = Enrolled() with
+        {
+            PendingComponent = AgentComponent.Updater,
+            PendingVersion = desired,
+            PendingPackageEndpoint = UpdateTestKit.AllowedEndpoint,
+            PendingSha256 = UpdateTestKit.Digest(archive),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Agent,
+            state,
+            NothingToDo(),
+            kit.ProbeInstalledAndStaged("0.2.0", desired),
+            archive);
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, after.LastUpdateOutcome);
+        Assert.Equal("new updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+
+        // Both components are now on it, so the note has done its job and is cleared.
+        Assert.Null(after.PendingComponent);
+    }
+
+    [Fact]
+    public async Task AComponentNeverActsOnANotePointingAtItself()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        AgentStateData state = Enrolled() with
+        {
+            PendingComponent = AgentComponent.Updater,
+            PendingVersion = "9.9.9",
+            PendingPackageEndpoint = UpdateTestKit.AllowedEndpoint,
+            PendingSha256 = UpdateTestKit.Digest(archive),
+        };
+
+        // The UPDATER's turn, with a note naming the updater. It must not act on it: a process that
+        // overwrites its own running image with a binary that will not execute leaves nothing on
+        // the machine able to put the old one back.
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting("9.9.9"),
+            archive);
+
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Equal("agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+        Assert.Equal(AgentComponent.Updater, after.PendingComponent);
+    }
+
+    [Fact]
+    public async Task TheUpdaterRestoresAnAgentThatHasNotRunSinceItWasReplaced()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "broken agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "working agent");
+
+        AgentStateData state = Enrolled() with
+        {
+            // The version is recorded where the PROBE CANNOT ERASE IT. AgentVersionInstalled is
+            // re-asked of the binary every run, and a binary that will not execute has none — so
+            // by the time a revert is due (never the same run as the swap, because the witness
+            // needs an intervening one) it is null, and the release that has to be blocked is
+            // nameless. Seeding only AgentVersionInstalled here is what hid that.
+            AgentVersionInstalled = "9.9.9",
+            AgentSwappedToVersion = "9.9.9",
+            AgentSwappedAt = _now.AddHours(-30),
+            LastAgentRunAt = _now.AddHours(-40),
+
+            // This updater completed a run AFTER the swap, so the machine was demonstrably up and
+            // the agent still did not start. That is the difference between a broken binary and a
+            // closed laptop; see AClosedLaptopIsNotABrokenBinary.
+            LastUpdaterRunAt = _now.AddHours(-24),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            // The check is never reached: recovery runs BEFORE any download, because a machine
+            // whose replaced component is silent has a problem worth fixing before it is handed a
+            // second new binary to fail at.
+            _ => throw new InvalidOperationException("the server must not be asked"),
+            UpdateTestKit.ProbeByPath(_ => null));
+
+        Assert.Equal(AgentUpdateOutcome.Reverted, after.LastUpdateOutcome);
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+        Assert.Null(after.AgentSwappedAt);
+
+        // The version that was put ON is blocked, not the one restored. Without this the machine
+        // oscillates: swap in, revert, be advertised the same version tomorrow, revert again.
+        Assert.Equal("9.9.9", after.LastRevertedVersion);
+    }
+
+    [Fact]
+    public async Task TheAgentRestoresAnUpdaterOnTheSameRule()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "broken updater");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Updater), "working updater");
+
+        AgentStateData state = Enrolled() with
+        {
+            UpdaterVersionInstalled = "9.9.9",
+            UpdaterSwappedToVersion = "9.9.9",
+            UpdaterSwappedAt = _now.AddHours(-100),
+            LastUpdaterRunAt = _now.AddHours(-120),
+
+            // The agent collects four times a day, so its own witness costs hours rather than the
+            // extra day it costs the updater.
+            LastAgentRunAt = _now.AddHours(-6),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Agent,
+            state,
+            _ => throw new InvalidOperationException("the server must not be asked"),
+            UpdateTestKit.ProbeByPath(_ => null));
+
+        Assert.Equal(AgentUpdateOutcome.Reverted, after.LastUpdateOutcome);
+        Assert.Equal("working updater", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Updater)));
+    }
+
+    [Fact]
+    public async Task AComponentThatHasRunSinceItsSwapIsLeftAlone()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "new agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "old agent");
+
+        AgentStateData state = Enrolled() with
+        {
+            AgentVersionInstalled = "9.9.9",
+            AgentSwappedAt = _now.AddHours(-30),
+            LastAgentRunAt = _now.AddHours(-1),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting("9.9.9"));
+
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Equal("new agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+
+        // The mark is cleared once the swap has proved itself, so the state file an administrator
+        // reads says what is actually true of this machine.
+        Assert.Null(after.AgentSwappedAt);
+    }
+
+    [Fact]
+    public async Task AnOfflineMachineIsNotMistakenForABrokenBinary()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "new agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "old agent");
+
+        // It has RUN since the swap; it simply has not managed to report. Reverting here would
+        // trade a working binary for a network outage — which is why the window reads the last RUN
+        // and not the last successful report.
+        AgentStateData state = Enrolled() with
+        {
+            AgentVersionInstalled = "9.9.9",
+            AgentSwappedAt = _now.AddHours(-30),
+            LastAgentRunAt = _now.AddHours(-2),
+            LastReportAt = _now.AddDays(-9),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting("9.9.9"));
+
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Equal("new agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task AVersionThatWasRevertedIsNeverInstalledAgain()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "working agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("bad agent", "new updater");
+
+        AgentStateData state = Enrolled() with { LastRevertedVersion = "9.9.9" };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            UpdateTestKit.ProbeReporting("0.2.0"),
+            archive);
+
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task AnAdvertisementFromAnUnlistedHostIsRecordedAsAFailedUpdate()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "working agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            Enrolled(),
+            Answering(new UpdateCheck(
+                UpdateCheckStatus.Advertised,
+                new AgentUpdateResponse(
+                    "9.9.9",
+                    "https://mirror.example.com/merlin/pkg.tar.gz",
+                    UpdateTestKit.Digest(archive)),
+                "advertised",
+                0)),
+            UpdateTestKit.ProbeReporting("0.2.0"),
+            archive);
+
+        // Reported, never inferred: the operator sees a failed update on /admin/agent rather than a
+        // machine that quietly never moved.
+        Assert.Equal(AgentUpdateOutcome.Failed, after.LastUpdateOutcome);
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    [Fact]
+    public async Task TheCallersOwnVersionAndRunTimeAreAlwaysStamped()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "agent");
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            Enrolled(),
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting("0.2.0"));
+
+        // The stamp is what the OTHER component reads to decide whether this one is alive.
+        Assert.Equal(AgentVersionInfo.Current, after.UpdaterVersionInstalled);
+        Assert.Equal(_now, after.LastUpdaterRunAt);
+        Assert.Equal("0.2.0", after.AgentVersionInstalled);
+    }
+
+    /// <summary>
+    /// A machine that was SWITCHED OFF across the window keeps the binary it was given.
+    /// </summary>
+    /// <remarks>
+    /// <b>Wall clock passes while a laptop is shut, and the elapsed window alone cannot tell the
+    /// difference.</b> A machine closed on Friday afternoon straight after a swap comes back on
+    /// Tuesday with the window long gone and the replaced agent — which is perfectly good — never
+    /// having run. Reverting there is not a missed opportunity that the next run puts right: it
+    /// writes <c>LastRevertedVersion</c>, which nothing ever clears, so that device refuses that
+    /// version for good and sits a version behind until somebody pins it elsewhere by hand. One
+    /// closed laptop at a time, a fleet strands itself.
+    /// </remarks>
+    [Fact]
+    public async Task AClosedLaptopIsNotABrokenBinary()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "new agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "old agent");
+
+        AgentStateData state = Enrolled() with
+        {
+            AgentVersionInstalled = "9.9.9",
+
+            // Swapped, and then the lid closed. NOTHING has run on this machine since — including
+            // the updater now asking the question, whose own last run is the swap itself.
+            AgentSwappedAt = _now.AddHours(-96),
+            LastAgentRunAt = _now.AddHours(-97),
+            LastUpdaterRunAt = _now.AddHours(-96),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeReporting("9.9.9"));
+
+        Assert.Null(after.LastUpdateOutcome);
+        Assert.Null(after.LastRevertedVersion);
+        Assert.Equal("new agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+
+        // The mark stays, so the question is asked again on the next run — by which time this
+        // updater will have a run of its own after the swap to answer it with.
+        Assert.Equal(_now.AddHours(-96), after.AgentSwappedAt);
+    }
+
+    /// <summary>
+    /// A component that was replaced and has not run since is not replaced AGAIN.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Stacking an unproven swap on an unproven swap breaks recovery in two ways at once.</b>
+    /// It resets the mark a revert is timed from, so the window restarts every run and the revert
+    /// never fires — an antivirus engine that quarantines the installed binary but not the freshly
+    /// downloaded one produces exactly that, and the machine re-downloads and re-swaps daily for
+    /// ever. And <c>Commit</c> retains only the IMMEDIATELY preceding binary, so the second swap
+    /// overwrites the retained copy with the unproven one: the last binary known to work is gone,
+    /// and a revert would put back something that never ran either.
+    /// </para>
+    /// <para>
+    /// Refusing here is what keeps the retained <c>.previous</c> a binary that has actually
+    /// executed on this machine, which is the entire premise of mutual recovery.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AnUnprovenSwapIsNeverStackedOnAnotherOne()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "quarantined agent");
+        File.WriteAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent), "the last agent that ran");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        AgentStateData state = Enrolled() with
+        {
+            // Replaced an hour ago and not seen to run. The installed binary will not report a
+            // version — it has been quarantined — so the advertised version does not match and
+            // the naive path would download and swap it all over again.
+            AgentSwappedAt = _now.AddHours(-1),
+            LastAgentRunAt = _now.AddHours(-3),
+            LastUpdaterRunAt = _now.AddHours(-24),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            UpdateTestKit.ProbeByPath(_ => null),
+            archive);
+
+        Assert.Null(after.LastUpdateOutcome);
+
+        // Nothing moved, and — the point of the rule — the retained binary is still the one that
+        // last actually ran, rather than having been overwritten by the unproven one.
+        Assert.Equal("quarantined agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+        Assert.Equal(
+            "the last agent that ran",
+            File.ReadAllText(kit.Layout.PreviousPathOf(AgentComponent.Agent)));
+
+        // The mark is untouched, so the revert window keeps running from the ORIGINAL swap rather
+        // than restarting. That is what stops the machine live-locking.
+        Assert.Equal(_now.AddHours(-1), after.AgentSwappedAt);
+    }
+
+
+    /// <summary>
+    /// A revert happening on a LATER run than the swap still names the release it undid.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every other revert test reverts in the run that also holds the version, which is a state
+    /// production can never reach.</b> The witness added for the closed-laptop case guarantees at
+    /// least one intervening run — and that run re-probes the target and persists the answer, so a
+    /// binary that will not execute writes <c>null</c> over the recorded version. The identity of
+    /// the release to block was therefore always destroyed before anything read it, and
+    /// <c>LastRevertedVersion</c> came out <c>null</c> on every revert that mattered. The block is
+    /// then dead code for exactly the case it exists for: the machine reinstalls the same broken
+    /// release, reverts it, is advertised it again, and oscillates for ever.
+    /// </para>
+    /// <para>
+    /// Three real runs, with the state carried between them exactly as the binaries carry it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ARevertOnALaterRunStillNamesTheVersionItUndid()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "working agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        // The installed agent answers until it is replaced; after that it is quarantined and will
+        // not execute, which is the whole point — a binary with no version to give.
+        bool replaced = false;
+
+        BinaryProbe probe = UpdateTestKit.ProbeByPath(path =>
+            !path.StartsWith(kit.Layout.InstallDirectory, StringComparison.Ordinal) ? "9.9.9"
+            : replaced ? null
+            : "0.2.0");
+
+        AgentStateData state = Enrolled() with { LastUpdaterRunAt = _now.AddHours(-24) };
+
+        // Run one — the swap.
+        state = await RunAtAsync(
+            kit, state, _now, Advertising("9.9.9", UpdateTestKit.Digest(archive)), probe, archive);
+
+        replaced = true;
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, state.LastUpdateOutcome);
+        Assert.Equal(_now, state.AgentSwappedAt);
+
+        // Run two — no witness yet, so no revert, and the re-probe nulls the recorded version.
+        state = await RunAtAsync(
+            kit,
+            state,
+            _now.AddHours(24),
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            probe,
+            archive);
+
+        Assert.Null(state.AgentVersionInstalled);
+        Assert.Equal(_now, state.AgentSwappedAt);
+
+        // Run three — the witness is in, the window has passed, and the revert happens.
+        state = await RunAtAsync(
+            kit,
+            state,
+            _now.AddHours(48),
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            probe,
+            archive);
+
+        Assert.Equal(AgentUpdateOutcome.Reverted, state.LastUpdateOutcome);
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+
+        // THE ASSERTION THIS TEST EXISTS FOR. Null here is an infinite reinstall loop.
+        Assert.Equal("9.9.9", state.LastRevertedVersion);
+
+        // And the block is live: run four is advertised the same version and refuses it.
+        state = await RunAtAsync(
+            kit,
+            state,
+            _now.AddHours(72),
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            probe,
+            archive);
+
+        Assert.Equal("working agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
+    }
+
+    /// <summary>
+    /// A component with nothing retained to restore is released rather than left in limbo.
+    /// </summary>
+    /// <remarks>
+    /// <b>There is no way back, so the machine must be given a way forward.</b> A component
+    /// installed where none existed has no retained copy — nor has one whose <c>.previous</c>
+    /// something removed — so the revert can never run, while the no-stacked-swap rule refuses
+    /// every future version too. That is a machine with no exit and, because no outcome was ever
+    /// recorded, nothing said about it to Merlin either: silence indistinguishable from a machine
+    /// that was never enrolled. It is released once, reported as a failure, and only the release
+    /// that caused it is blocked.
+    /// </remarks>
+    [Fact]
+    public async Task NothingRetainedToRestoreReleasesTheComponentAndSaysSo()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "agent that will not run");
+
+        // Deliberately NO .previous — this component was installed where none existed.
+        Assert.False(File.Exists(kit.Layout.PreviousPathOf(AgentComponent.Agent)));
+
+        AgentStateData state = Enrolled() with
+        {
+            AgentSwappedAt = _now.AddHours(-30),
+            AgentSwappedToVersion = "9.9.9",
+
+            // A working binary WAS retained by that swap and has since gone — which is what makes
+            // refusing the release afterwards the right answer. See the sibling test for the case
+            // where nothing was ever there.
+            AgentSwapHadFallback = true,
+            LastAgentRunAt = _now.AddHours(-40),
+            LastUpdaterRunAt = _now.AddHours(-24),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Updater,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeByPath(_ => null));
+
+        // Released, so a fixed version can get in — and reported, so somebody can see why.
+        Assert.Null(after.AgentSwappedAt);
+        Assert.Equal(AgentUpdateOutcome.Failed, after.LastUpdateOutcome);
+        Assert.Contains("no previous binary", after.LastUpdateDetail!, StringComparison.Ordinal);
+
+        // The dead release is blocked, so the machine stops re-downloading a package it has already
+        // proved does not work here.
+        Assert.Equal("9.9.9", after.LastRevertedVersion);
+    }
+
+    private static async Task<AgentStateData> RunAtAsync(
+        UpdateTestKit kit,
+        AgentStateData state,
+        DateTimeOffset now,
+        Func<CancellationToken, Task<UpdateCheck>> check,
+        BinaryProbe probe,
+        byte[] archive)
+    {
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        ComponentSwapper swapper = new(
+            AgentComponent.Updater, kit.Layout, http, probe, _ => { });
+
+        UpdateRunner runner = new(
+            AgentComponent.Updater, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { },
+            () => _now, _ => { });
+
+        // A fresh swapper per run, exactly as a fresh process gets, and the previous run's own
+        // stamp as the witness — which is what the updater passes in production.
+        return await runner.RunAsync(state, state.LastUpdaterRunAt, check, now);
+    }
+
+    /// <summary>
+    /// A component installed where none existed is not blocklisted for never having run.
+    /// </summary>
+    /// <remarks>
+    /// <b>The release is not what failed — something has to RUN the component and nothing has.</b>
+    /// On the ordinary upgrade from a version before the updater existed, the agent installs an
+    /// updater onto a machine whose scheduler knows nothing about it, so it sits there unexecuted.
+    /// Refusing the version then blocklists a healthy release on every machine in the fleet that
+    /// has not been reinstalled, and tells whoever reads the message to look at the release rather
+    /// than at the missing schedule.
+    /// </remarks>
+    [Fact]
+    public async Task AComponentInstalledWhereNoneExistedIsNotBlocklistedForNeverRunning()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Updater, "an updater nothing runs");
+
+        AgentStateData state = Enrolled() with
+        {
+            UpdaterSwappedAt = _now.AddHours(-100),
+            UpdaterSwappedToVersion = "0.3.0",
+
+            // Nothing was retained because nothing was there.
+            UpdaterSwapHadFallback = false,
+            LastUpdaterRunAt = null,
+            LastAgentRunAt = _now.AddHours(-6),
+        };
+
+        AgentStateData after = await RunAsync(
+            kit,
+            AgentComponent.Agent,
+            state,
+            NothingToDo(),
+            UpdateTestKit.ProbeByPath(_ => null));
+
+        // Reported, and released so a later version can still land.
+        Assert.Equal(AgentUpdateOutcome.Failed, after.LastUpdateOutcome);
+        Assert.Null(after.UpdaterSwappedAt);
+        Assert.Contains("has never run", after.LastUpdateDetail!, StringComparison.Ordinal);
+
+        // THE ASSERTION THIS EXISTS FOR: a healthy release is not refused for want of a scheduler.
+        Assert.Null(after.LastRevertedVersion);
+    }
+
+    /// <summary>
+    /// The swap mark records when the file was replaced, not when the turn began.
+    /// </summary>
+    /// <remarks>
+    /// <b>The turn's own instant predates an update check and a download bounded at ten minutes.</b>
+    /// A mark stamped from it says when this process STARTED, and the other component compares that
+    /// mark against its OWN start instant to decide whether it is the image that was just replaced
+    /// — so a mark that predates the swap makes that comparison miss exactly the window it exists
+    /// for: an agent that starts after the updater begins but before the swap lands is the pre-swap
+    /// image, is not recognised as one, and stamps a run that certifies a binary which has never
+    /// executed.
+    /// </remarks>
+    [Fact]
+    public async Task TheSwapMarkRecordsWhenTheFileWasReplaced()
+    {
+        using UpdateTestKit kit = new();
+
+        kit.PlaceComponent(AgentComponent.Agent, "old agent");
+
+        byte[] archive = UpdateTestKit.BuildArchive("new agent", "new updater");
+
+        using HttpClient http = UpdateTestKit.Serving(archive);
+
+        BinaryProbe probe = kit.ProbeInstalledAndStaged("0.2.0", "9.9.9");
+        ComponentSwapper swapper = new(AgentComponent.Updater, kit.Layout, http, probe, _ => { });
+
+        // The swap takes ninety seconds — a download, a hash and a probe.
+        DateTimeOffset completedAt = _now.AddSeconds(90);
+
+        UpdateRunner runner = new(
+            AgentComponent.Updater,
+            kit.Layout,
+            swapper,
+            probe,
+            UpdateWindows.Default,
+            _ => { },
+            () => completedAt,
+            _ => { });
+
+        AgentStateData after = await runner.RunAsync(
+            Enrolled(),
+            _now.AddHours(-24),
+            Advertising("9.9.9", UpdateTestKit.Digest(archive)),
+            _now);
+
+        Assert.Equal(AgentUpdateOutcome.Succeeded, after.LastUpdateOutcome);
+
+        // Not _now. An agent that started at _now + 40s is the pre-swap image and must be able to
+        // tell, which it can only do if this instant is later than its own start.
+        Assert.Equal(completedAt, after.AgentSwappedAt);
+    }
+
+    private static AgentStateData Enrolled() => new(
+        "https://isms.example.com",
+        Guid.NewGuid(),
+        "DEV-001",
+        _now.AddDays(-30),
+        ClockOffsetSeconds: 0,
+        LastReportAt: _now.AddHours(-1),
+        LastReportJson: null);
+
+    private static Func<CancellationToken, Task<UpdateCheck>> NothingToDo() =>
+        Answering(new UpdateCheck(UpdateCheckStatus.NothingToDo, null, "nothing to do", 0));
+
+    private static Func<CancellationToken, Task<UpdateCheck>> Advertising(string version, string digest) =>
+        Answering(new UpdateCheck(
+            UpdateCheckStatus.Advertised,
+            new AgentUpdateResponse(version, UpdateTestKit.AllowedEndpoint, digest),
+            "advertised",
+            0));
+
+    private static Func<CancellationToken, Task<UpdateCheck>> Answering(UpdateCheck answer) =>
+        _ => Task.FromResult(answer);
+
+    private static async Task<AgentStateData> RunAsync(
+        UpdateTestKit kit,
+        AgentComponent self,
+        AgentStateData state,
+        Func<CancellationToken, Task<UpdateCheck>> check,
+        BinaryProbe probe,
+        byte[]? archive = null)
+    {
+        using HttpClient http = UpdateTestKit.Serving(archive ?? []);
+
+        ComponentSwapper swapper = new(self, kit.Layout, http, probe, _ => { });
+        UpdateRunner runner = new(
+            self, kit.Layout, swapper, probe, UpdateWindows.Default, _ => { }, () => _now, _ => { });
+
+        // The state handed in is the state as READ, so its own last-run stamp is genuinely the
+        // previous one — which is exactly what the updater passes in production. The agent has to
+        // carry the value separately because it stamps itself before it gets here.
+        return await runner.RunAsync(state, state.LastRunOf(self), check, _now);
+    }
+}

@@ -125,4 +125,101 @@ public sealed class SupplementalReadingsTests
         // unobserved and Merlin's fallback rule reasons from the install date instead.
         Assert.Null(merged.Patching?.PendingSecurityUpdates);
     }
+
+    /// <summary>
+    /// A TPM nobody could look for is <c>null</c>, and only a machine we could actually examine
+    /// reports a definite absence.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the reading most able to make a confident wrong statement.</b> The flag was once
+    /// derived as <c>ReadFile(...) is not null</c>, which reported a definite "no security
+    /// processor" for a sysfs node the agent was merely refused. Replacing that with a
+    /// <c>Directory.Exists</c> on the device node moved the boundary without closing it:
+    /// <c>Directory.Exists</c> RETURNS FALSE for a path it cannot stat rather than throwing, so a
+    /// machine with no <c>/sys</c> mounted — a container, a chroot, a lockdown environment — still
+    /// came back as a definite <c>false</c>, and the "not observed" answer was returned by no path
+    /// at all. The enumeration point is the third input that separates them.
+    /// </remarks>
+    [Theory]
+
+    // A version we could read proves presence on its own, whatever the directory says.
+    [InlineData("2", true, true, true, "2")]
+    [InlineData("2", false, false, true, "2")]
+    [InlineData("  2\n", true, true, true, "2")]
+
+    // A node we can see whose version we cannot read: present, and honestly undescribed.
+    [InlineData(null, true, true, true, null)]
+    [InlineData("", true, true, true, null)]
+    [InlineData("   ", true, true, true, null)]
+
+    // No node, but sysfs was there to be read. The ordinary answer on a VM or an older board, and
+    // a TRUE reading that would be lost by calling it unknown.
+    [InlineData(null, false, true, false, null)]
+
+    // Nothing to look in. Not observed — never a protection reported as absent.
+    [InlineData(null, false, false, null, null)]
+    [InlineData("", false, false, null, null)]
+    [InlineData("   ", false, false, null, null)]
+
+    // The node in view but not the enumeration point above it. Unreachable through the current
+    // call site, which probes both — but this is public API and the answer must still be honest.
+    [InlineData(null, true, false, true, null)]
+    public void ATpmIsOnlyAbsentOnAMachineWeCouldExamine(
+        string? versionMajor,
+        bool deviceNodeVisible,
+        bool sysfsVisible,
+        bool? expectedPresent,
+        string? expectedVersion)
+    {
+        (bool? present, string? version) =
+            ReadingParsers.TpmFromSysfs(versionMajor, deviceNodeVisible, sysfsVisible);
+
+        Assert.Equal(expectedPresent, present);
+        Assert.Equal(expectedVersion, version);
+    }
+
+    /// <summary>
+    /// The flag and the version are two halves of ONE observation and can never disagree.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// They were once derived from two independent reads, which is what let a machine report a TPM
+    /// that is present with no version — or a version for a machine reported as having none.
+    /// </para>
+    /// <para>
+    /// <b>Both assertions are UNCONDITIONAL, and that is not a style preference.</b> Written as two
+    /// <c>if</c> blocks, the rows returning <c>(true, null)</c> and <c>(null, null)</c> entered
+    /// neither — and xUnit does not fail a test that asserts nothing, so half the rows were green
+    /// no matter what the method returned. A theory that reports coverage it does not have is worse
+    /// than no theory, because it is counted.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("2", true, true)]
+    [InlineData("2", false, false)]
+    [InlineData("   ", true, true)]
+    [InlineData(null, true, true)]
+    [InlineData(null, true, false)]
+    [InlineData(null, false, true)]
+    [InlineData(null, false, false)]
+    public void ATpmVersionIsNeverReportedForAMachineSaidToHaveNoTpm(
+        string? versionMajor,
+        bool deviceNodeVisible,
+        bool sysfsVisible)
+    {
+        (bool? present, string? version) =
+            ReadingParsers.TpmFromSysfs(versionMajor, deviceNodeVisible, sysfsVisible);
+
+        Assert.True(
+            version is null || present is true,
+            $"version '{version}' was reported alongside present={FormatPresence(present)}, so the "
+            + "two halves of one reading disagree.");
+
+        Assert.True(
+            present is not false || version is null,
+            $"a definite absence carried the version '{version}'.");
+    }
+
+    private static string FormatPresence(bool? present) =>
+        present?.ToString() ?? "null";
 }

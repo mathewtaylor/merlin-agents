@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Merlin.Agent.Core.Contracts;
 using Merlin.Agent.Core.Crypto;
-using Merlin.Agent.Crypto;
 
 namespace Merlin.Agent.Transport;
 
@@ -31,6 +30,22 @@ public sealed record TransportResult(bool Succeeded, string Detail, DateTimeOffs
 /// turns "this laptop can never report" into a self-healing hiccup. The offset is persisted so the
 /// next run starts correct.
 /// </para>
+/// <para>
+/// <b>THE OFFSET IS ABSOLUTE, AND THE CALLER MUST HAND OVER A RAW INSTANT.</b> This client applies
+/// <see cref="ClockOffsetSeconds"/> itself, so <c>now</c> is this machine's uncorrected clock and
+/// what comes back out is the correction to store. A caller that pre-applies the stored offset AND
+/// lets the client learn gets a <b>residual</b> — how wrong the already-corrected time still is —
+/// which is right for the retry in flight and wrong the moment it is persisted, because every
+/// reader treats the stored field as absolute.
+/// </para>
+/// <para>
+/// It does not fail loudly. With <c>A</c> the true offset and <c>s</c> the stored one, persisting
+/// the residual gives <c>s' = A - s</c>: a two-cycle that never converges, so a drifting machine
+/// alternates between two wrong offsets for ever, paying a refusal and a retry on every single
+/// run. It hid because the FIRST correction is taken against a raw instant and is therefore
+/// genuinely absolute, so a freshly enrolled machine looks perfect. <c>UpdateClient</c> has always
+/// worked this way; this client is the one that did not.
+/// </para>
 /// </remarks>
 public sealed class ReportClient : IDisposable
 {
@@ -48,7 +63,12 @@ public sealed class ReportClient : IDisposable
     /// <param name="serverUrl">The Merlin deployment's base address.</param>
     /// <param name="key">The device signing key.</param>
     /// <param name="agentVersion">This agent's version.</param>
-    public ReportClient(string serverUrl, ECDsa key, string agentVersion)
+    /// <param name="clockOffsetSeconds">
+    /// The correction this machine already knows it needs, from a previous run. Pass it and hand
+    /// <c>now</c> over raw; do not pre-apply it. Zero for enrolment and for a move to a different
+    /// deployment, which has its own clock and must be learned from scratch.
+    /// </param>
+    public ReportClient(string serverUrl, ECDsa key, string agentVersion, long clockOffsetSeconds = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(serverUrl);
 
@@ -56,6 +76,15 @@ public sealed class ReportClient : IDisposable
         {
             BaseAddress = new Uri(serverUrl.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = TimeSpan.FromSeconds(60),
+
+            // BOUNDED, BECAUSE THIS BODY IS NEITHER ALLOWLISTED NOR HASH-PINNED. The package
+            // download has both and is streamed against a running total; this one comes from
+            // whatever address the state file names, is buffered whole by default, and is read
+            // into a string — two bytes of memory per byte on the wire — inside a process running
+            // as SYSTEM or root. Every answer this endpoint gives is a few hundred bytes.
+            // Exceeding it raises HttpRequestException, which every caller here now turns into a
+            // refused request rather than letting it escape, so it adds no new failure mode.
+            MaxResponseContentBufferSize = 64 * 1024,
         };
 
         _http.DefaultRequestHeaders.UserAgent.Add(
@@ -63,9 +92,13 @@ public sealed class ReportClient : IDisposable
 
         _key = key;
         _agentVersion = agentVersion;
+        ClockOffsetSeconds = ClockSkew.Sanitise(clockOffsetSeconds);
     }
 
-    /// <summary>The clock offset, in seconds, learned from a refused request.</summary>
+    /// <summary>
+    /// The ABSOLUTE correction to add to this machine's clock, in seconds — as supplied, or as
+    /// relearned from a refusal. This is the value to persist.
+    /// </summary>
     public long ClockOffsetSeconds { get; private set; }
 
     /// <summary>Enrols this machine.</summary>
@@ -85,7 +118,26 @@ public sealed class ReportClient : IDisposable
             using HttpRequestMessage message = Build("api/agent/enrol", body, deviceId: null, now);
             message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", enrolmentKey);
 
-            using HttpResponseMessage response = await _http.SendAsync(message).ConfigureAwait(false);
+            HttpResponseMessage sent;
+
+            try
+            {
+                sent = await _http.SendAsync(message).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+            {
+                // AN UNREACHABLE MERLIN IS AN OUTCOME, not a crash. It reads as one to the person
+                // typing `enrol` — who is standing in front of the machine, often on a network
+                // that is the actual problem. The response-size cap also surfaces here, and a
+                // captive portal's HTML login page is exactly what trips it: without this the
+                // operator was told "Cannot write more bytes to the buffer than the configured
+                // maximum buffer size: 65536" rather than that the server could not be reached.
+                return (
+                    new TransportResult(false, $"Merlin could not be reached: {exception.Message}", null),
+                    null);
+            }
+
+            using HttpResponseMessage response = sent;
             string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
@@ -98,7 +150,7 @@ public sealed class ReportClient : IDisposable
                     : (new TransportResult(true, $"Enrolled as {enrolled.DeviceCode}.", enrolled.ServerTime), enrolled);
             }
 
-            if (TryLearnOffset(response.StatusCode, content, ref now, attempt))
+            if (TryLearnOffset(response.StatusCode, content, now, attempt))
             {
                 continue;
             }
@@ -125,20 +177,43 @@ public sealed class ReportClient : IDisposable
         for (int attempt = 0; attempt < 2; attempt++)
         {
             using HttpRequestMessage message = Build("api/agent/report", body, deviceId, now);
-            using HttpResponseMessage response = await _http.SendAsync(message).ConfigureAwait(false);
-            string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            if (response.IsSuccessStatusCode)
+            // A REPORT THAT COULD NOT BE MADE IS A FAILED REPORT, NOT A THROWN ONE — and this is
+            // the only place that can say so while still holding the JSON it built. When the caller
+            // wrapped the call instead, it had nothing to hand back but the PREVIOUS payload, so
+            // `merlin-agent status` showed a stale one while promising it shows exactly what this
+            // machine tried to send. That promise is a transparency commitment, not a convenience.
+            // Letting it throw is worse still: an outage then skips the update turn, which is the
+            // one part of a run that needs no network at all.
+            HttpResponseMessage response;
+
+            try
             {
-                return (new TransportResult(true, "Report accepted.", null), json);
+                response = await _http.SendAsync(message).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+            {
+                return (
+                    new TransportResult(false, $"Merlin could not be reached: {exception.Message}", null),
+                    json);
             }
 
-            if (TryLearnOffset(response.StatusCode, content, ref now, attempt))
+            using (response)
             {
-                continue;
-            }
+                string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            return (new TransportResult(false, Describe(response.StatusCode, content), null), json);
+                if (response.IsSuccessStatusCode)
+                {
+                    return (new TransportResult(true, "Report accepted.", null), json);
+                }
+
+                if (TryLearnOffset(response.StatusCode, content, now, attempt))
+                {
+                    continue;
+                }
+
+                return (new TransportResult(false, Describe(response.StatusCode, content), null), json);
+            }
         }
 
         return (new TransportResult(false, "The report was refused twice, including after a clock correction.", null), json);
@@ -157,7 +232,24 @@ public sealed class ReportClient : IDisposable
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, WireJsonContext.Default.AgentRotateRequest);
 
         using HttpRequestMessage message = Build("api/agent/rotate", body, deviceId, now);
-        using HttpResponseMessage response = await _http.SendAsync(message).ConfigureAwait(false);
+
+        HttpResponseMessage sent;
+
+        try
+        {
+            sent = await _http.SendAsync(message).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+            // As in EnrolAsync. The caller already answers a failure with "the existing key is
+            // unchanged and this machine keeps reporting", which is the true and reassuring thing
+            // to say about an outage — and is what an escaping exception replaced with a raw
+            // transport message.
+            return new TransportResult(
+                false, $"Merlin could not be reached: {exception.Message}", null);
+        }
+
+        using HttpResponseMessage response = sent;
         string content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
         return response.IsSuccessStatusCode
@@ -206,7 +298,7 @@ public sealed class ReportClient : IDisposable
     private bool TryLearnOffset(
         HttpStatusCode statusCode,
         string content,
-        ref DateTimeOffset now,
+        DateTimeOffset now,
         int attempt)
     {
         if (attempt > 0 || statusCode != HttpStatusCode.BadRequest)
@@ -225,23 +317,24 @@ public sealed class ReportClient : IDisposable
             return false;
         }
 
-        if (refusal is null || refusal.ServerTime <= 0)
+        // The RANGE of serverTime is ClockSkew's business, including the non-positive case — a
+        // second copy of half a rule here is the drift shape the extraction exists to prevent.
+        if (refusal is null)
         {
             return false;
         }
 
-        DateTimeOffset serverTime = DateTimeOffset.FromUnixTimeSeconds(refusal.ServerTime);
-        long offset = (long)(serverTime - now).TotalSeconds;
-
-        // Only worth retrying when the clock is actually the likely cause. A one-second difference
-        // is not why a request was refused, and retrying every refusal would double the load a
-        // genuinely misconfigured fleet puts on the server.
-        if (Math.Abs(offset) < 30)
+        // ONE RULE, SHARED. It was this twenty lines and this comment in two files, and the two
+        // halves had already drifted once — one learning an absolute correction and the other a
+        // residual, which produced a machine alternating between two wrong offsets for ever. Only
+        // one of the two files sits in a project the test project can reference, so a duplicated
+        // rule was also a rule that was half tested by construction.
+        if (!ClockSkew.TryLearn(refusal.ServerTime, now, ClockOffsetSeconds, out long learned))
         {
             return false;
         }
 
-        ClockOffsetSeconds = offset;
+        ClockOffsetSeconds = learned;
         return true;
     }
 
