@@ -167,8 +167,9 @@ process that replaces a SYSTEM binary. Four properties bound it:
    There is no verb the machine dispatches on, and the server cannot reach a machine that does not
    call it.
 2. **A compile-time host allowlist in both binaries.** Packages are fetched only from the GitHub
-   release hosts — `github.com` and `objects.githubusercontent.com`, the two entries of
-   `PackageHosts.Allowed`, and nothing else — whatever a deployment is configured to advertise, and
+   release hosts — `github.com`, `objects.githubusercontent.com` and
+   `release-assets.githubusercontent.com`, the three entries of `PackageHosts.Allowed`, and nothing
+   else — whatever a deployment is configured to advertise, and
    the final address is re-checked after redirects. A SERVER-side allowlist would protect nothing against the threat it
    names — whoever can set the address can set the allowlist beside it — so the list is baked in and
    **server configuration alone cannot redirect a fleet**. This pins the distribution CHANNEL where

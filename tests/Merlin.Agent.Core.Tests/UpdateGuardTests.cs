@@ -16,6 +16,10 @@ public sealed class PackageHostTests
     [Theory]
     [InlineData("https://github.com/mathewtaylor/merlin-agents/releases/download/v0.3.0/pkg.tar.gz")]
     [InlineData("https://objects.githubusercontent.com/whatever")]
+    // GitHub moved release-asset downloads here, and the redirect re-check in DownloadAsync then
+    // refused every package on every platform. Auto-update cannot repair that failure — the
+    // updater is what is broken — so this case stands for a fleet-wide manual reinstall.
+    [InlineData("https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x")]
     [InlineData("https://GITHUB.COM/mathewtaylor/merlin-agents/pkg.zip")]
     public void TheReleaseHostsAreAllowed(string endpoint) =>
         Assert.True(PackageHosts.IsAllowed(endpoint));
