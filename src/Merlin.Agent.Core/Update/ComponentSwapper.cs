@@ -462,8 +462,10 @@ public sealed class ComponentSwapper
         }
 
         // A redirect off the allowlist is a redirect off the allowlist. HttpClient follows them by
-        // default, so the final address is re-checked — github.com hands every download to
-        // objects.githubusercontent.com, and both are on the list precisely because of it.
+        // default, so the final address is re-checked — github.com hands every download to one of
+        // its asset hosts, which is why those are on the list at all and why the list has to move
+        // when GitHub moves them. It did, to release-assets.githubusercontent.com, and until 0.3.2
+        // this line was where every fleet's auto-update stopped.
         // FAILS CLOSED. An address we cannot read is not an address we have checked, and this is
         // the last gate in front of executing whatever arrives — so "no final address" must refuse
         // rather than fall through. HttpClient always populates these in practice, but the

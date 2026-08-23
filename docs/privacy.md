@@ -63,8 +63,8 @@ Reports go to your organisation's own Merlin deployment, at the address recorded
 and shown by `merlin-agent status`. Nothing is sent anywhere else.
 
 There is one other outbound destination, and it is worth stating plainly because it is new: to
-update itself the agent downloads a release package from **`github.com`** (which redirects to
-`objects.githubusercontent.com`), the public home of this open-source project. That request carries
+update itself the agent downloads a release package from **`github.com`** (which redirects to one
+of GitHub's own asset hosts), the public home of this open-source project. That request carries
 no report and nothing about you or your machine — it is an ordinary file download of a published
 release. The list of hosts a package may come from is compiled into the binary, so neither your
 Merlin deployment nor anyone able to answer for it can point this at somewhere else, and the file

@@ -41,8 +41,26 @@ public static class PackageHosts
     /// <remarks>
     /// <para>
     /// The GitHub release hosts, because that is where CI publishes — <c>github.com</c> issues the
-    /// download and redirects to <c>objects.githubusercontent.com</c>, so both are needed or every
-    /// download fails on the redirect.
+    /// download and redirects to whichever asset host is serving that day, so the redirect targets
+    /// are needed here too or every download fails on the redirect.
+    /// </para>
+    /// <para>
+    /// <b>GITHUB MOVED THE ASSET HOST AND KILLED EVERY FLEET'S AUTO-UPDATE.</b> A release download
+    /// now redirects to <c>release-assets.githubusercontent.com</c>; <c>objects.githubusercontent.com</c>
+    /// has left the chain entirely. Every installed agent refused every package with
+    /// <see cref="Refusal"/> and stayed on the version it had. <b>This failure is unrecoverable
+    /// from the fleet side</b> — the updater is the component that is broken, so the fix cannot be
+    /// delivered by an update and every machine needs a manual reinstall. That asymmetry is why
+    /// <c>objects.githubusercontent.com</c> is RETAINED rather than swept out under the
+    /// buys-nothing rule below: it is the same publisher on the same trust boundary, so keeping a
+    /// host GitHub may route back to costs nothing worth measuring, while removing one it turns
+    /// out to still use costs a hand reinstall of every machine in every deployment.
+    /// </para>
+    /// <para>
+    /// <b>A pinned distribution CHANNEL is a pin on infrastructure somebody else moves.</b> That
+    /// is the standing cost of this control and it is accepted, not solved — code signing is what
+    /// removes it. Until then, changing this list is a release, and an agent that cannot download
+    /// cannot be told about the new one.
     /// </para>
     /// <para>
     /// <b>Nothing else, and a host is not added here because some other part of the product
@@ -66,7 +84,8 @@ public static class PackageHosts
     public static FrozenSet<string> Allowed { get; } = FrozenSet.Create(
         StringComparer.OrdinalIgnoreCase,
         "github.com",
-        "objects.githubusercontent.com");
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com");
 
     /// <summary>
     /// Whether an address may be downloaded from.
