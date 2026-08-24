@@ -295,6 +295,12 @@ public static class Program
                     UpdaterVersion = BinaryProbe.Default.Version(
                         InstallLayout.Current.PathOf(AgentComponent.Updater)),
                     LastUpdateOutcome = state.LastUpdateOutcome?.ToString(),
+
+                    // AND THE REASON WITH IT. The sentence was already here, written by
+                    // UpdateRunner and printed by `merlin-updater status`; it simply never left the
+                    // machine, so Merlin held an outcome it could not explain and every
+                    // AgentUpdateFailed row an administrator opened was blank.
+                    LastUpdateDetail = state.LastUpdateDetail,
                 };
 
                 // SEEDED WITH THE STORED OFFSET, and handed a RAW instant below. Pre-applying it
