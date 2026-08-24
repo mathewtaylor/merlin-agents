@@ -262,6 +262,13 @@ public sealed record AgentUpdateResponse(string Version, string PackageEndpoint,
 /// version cannot tell "updated and rolled back" from "never attempted", because both leave the
 /// version unmoved, and a silent failed update is the worst thing auto-update can produce.
 /// </param>
+/// <param name="LastUpdateDetail">
+/// One sentence saying WHY the last attempt ended as it did, or <c>null</c> when there is nothing
+/// to add. <b>An outcome without a reason is not a diagnosis.</b> This sentence has always been
+/// written into <c>state.json</c> and printed by <c>merlin-updater status</c>, and was never sent
+/// — so the only way to find out why a machine would not update was to get a shell on it, which is
+/// exactly the machine you cannot reach.
+/// </param>
 public sealed record AgentReportPayload(
     DateTimeOffset CollectedAt,
     string AgentVersion,
@@ -283,7 +290,8 @@ public sealed record AgentReportPayload(
     AgentAccountsReading? Accounts,
     AgentCapacityReading? Capacity,
     string? UpdaterVersion = null,
-    string? LastUpdateOutcome = null);
+    string? LastUpdateOutcome = null,
+    string? LastUpdateDetail = null);
 
 /// <summary>
 /// Operating-system readings.
