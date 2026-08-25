@@ -377,20 +377,42 @@ public sealed record AgentPatchingReading(
 /// Local account and password-policy readings.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <b><see cref="LocalAdministratorNames"/> is the only person-shaped field the agent sends</b>, and
 /// it is here because A.8.2 is materially weaker without it: a count says there are four local
 /// administrators but not that one of them is unexpected. These are LOCAL ACCOUNT names — machine
 /// configuration — not the identity of whoever is signed in, which this agent never reads.
+/// </para>
+/// <para>
+/// <b>"No limit" is <c>-1</c>, NEVER <c>null</c>.</b> A password policy that deliberately sets no
+/// expiry is a decision somebody took and is exactly what the reader needs to see; <c>null</c>
+/// means the reading was never taken. Collapsing the two would render an organisation that has
+/// consciously adopted no-scheduled-rotation identically to one whose agent could not read the
+/// policy at all — and the first is a stated position while the second is a gap. The value matches
+/// what <c>secedit</c> itself writes, so a reader comparing the two sees the same number.
+/// </para>
 /// </remarks>
 /// <param name="LocalAdministratorNames">Local accounts holding administrator rights.</param>
 /// <param name="PasswordMinimumLength">Minimum local password length policy.</param>
 /// <param name="PasswordComplexityEnabled">Whether complexity is enforced.</param>
 /// <param name="LockoutThreshold">Lockout threshold; 0 means no lockout.</param>
+/// <param name="PasswordHistorySize">How many previous passwords may not be reused; 0 means none.</param>
+/// <param name="PasswordMinimumAgeDays">Days a password must be held before it may be changed.</param>
+/// <param name="PasswordMaximumAgeDays">Days before a password expires; <c>-1</c> means never.</param>
+/// <param name="LockoutDurationMinutes">
+/// Minutes a locked account stays locked; <c>-1</c> means until an administrator unlocks it.
+/// </param>
+/// <param name="LockoutObservationWindowMinutes">Minutes over which failed attempts accumulate.</param>
 public sealed record AgentAccountsReading(
     IReadOnlyList<string>? LocalAdministratorNames,
     int? PasswordMinimumLength,
     bool? PasswordComplexityEnabled,
-    int? LockoutThreshold);
+    int? LockoutThreshold,
+    int? PasswordHistorySize = null,
+    int? PasswordMinimumAgeDays = null,
+    int? PasswordMaximumAgeDays = null,
+    int? LockoutDurationMinutes = null,
+    int? LockoutObservationWindowMinutes = null);
 
 /// <summary>Capacity readings.</summary>
 /// <param name="SystemDiskFreePercent">Free space on the system volume, as a percentage.</param>

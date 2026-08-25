@@ -38,7 +38,7 @@ worse promise than no manifest. `merlin-agent status --manifest` prints this lis
 
 | Platform | Source | What it gives |
 |---|---|---|
-| Windows | `net accounts` | Minimum password length, lockout threshold |
+| Windows | `net accounts` | Minimum password length, password history size, minimum and maximum password age, lockout threshold, lockout duration, lockout observation window |
 | macOS | `pwpolicy -getaccountpolicies` | Minimum password length |
 | Linux | `/etc/security/pwquality.conf`, `/etc/login.defs` | Minimum password length, complexity |
 | Linux | `/sys/firmware/efi/efivars/SecureBoot-*` | Whether Secure Boot is enforced |
@@ -64,8 +64,17 @@ never becomes a pass or a failure.
   COM API is a dependency this agent avoids. `patches` gives the date of the last installed update
   instead, and Merlin's patch check falls back to that age — which is observable and actionable,
   where an invented count would not be.
-- **Password complexity is not read.** `net accounts` does not expose it; only `secedit /export`
-  does, which writes a file containing far more of the security policy than is wanted.
+- **Password complexity IS read, and only a 0 or a 1 counts.** It comes from osquery's
+  `security_profile_info`, which calls the SCE API behind `secedit` in process rather than running
+  the CLI that would leave a file behind. osquery clamps SCE's "no value" sentinel to `-1`, so a
+  machine whose policy could not be read reports `-1` and the agent sends null — never false, which
+  would fail it against a value nobody measured. The numeric half of the policy is deliberately not
+  taken from that table; see the query's own comment in `packaging/queries/windows.json`.
+- **The `net accounts` labels are matched in English.** A localised Windows prints localised labels,
+  every match misses, and the whole section reports null — not observed, which is the honest
+  degradation rather than a wrong reading, but it does mean a non-English fleet gets no password
+  policy at all. `NetUserModalsGet` returns the same seven values as a struct with no text to parse
+  and is the proper fix.
 - **Antimalware signature age is inferred**, from the platform security centre's own verdict, rather
   than read directly. Where the centre says nothing, the reading is null.
 

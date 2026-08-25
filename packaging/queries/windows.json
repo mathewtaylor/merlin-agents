@@ -74,6 +74,30 @@
       "sql": "SELECT u.username FROM users u JOIN user_groups ug ON u.uid = ug.uid JOIN groups g ON ug.gid = g.gid WHERE g.groupname = 'Administrators';",
       "purpose": "Local accounts holding administrator rights (A.8.2)."
     },
+    "password_complexity": {
+      "$comment": [
+        "ONE COLUMN, NAMED. `security_profile_info` also carries the local Administrator and",
+        "Guest account names and nine audit-policy settings; none of that is wanted, so the",
+        "query names the single column it needs and the rest cannot be returned \u2014 the same",
+        "rule the entra_join query follows.",
+        "",
+        "This does NOT run secedit and writes nothing to disk. osquery calls",
+        "SceGetSecurityProfileInfo in scecli.dll in process and frees the result; the temporary",
+        "file that the secedit CLI would leave behind is the reason this was left uncollected",
+        "until now, and it does not exist on this path.",
+        "",
+        "-1 MEANS NOT CONFIGURED, NOT 'OFF'. osquery clamps the SCE no-value sentinel to -1, so",
+        "only 0 and 1 are answers. Reading -1 as false would fail every machine whose policy SCE",
+        "could not read, against a value nobody measured.",
+        "",
+        "The table also exposes password length, both ages, history and the lockout threshold.",
+        "Those are deliberately NOT taken from here: its maximum_password_age of -1 cannot be",
+        "told apart from 'not configured', where `net accounts` prints the word 'Unlimited'.",
+        "One value, one source."
+      ],
+      "sql": "SELECT password_complexity FROM security_profile_info;",
+      "purpose": "Whether local passwords must meet complexity requirements (A.5.17)."
+    },
     "system_drive": {
       "sql": "SELECT device_id, free_space, size FROM logical_drives WHERE type = 'Fixed' AND device_id = 'C:';",
       "purpose": "Free space on the system volume (A.8.6 capacity)."

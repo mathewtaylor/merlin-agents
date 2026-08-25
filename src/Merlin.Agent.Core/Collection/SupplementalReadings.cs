@@ -25,6 +25,13 @@ namespace Merlin.Agent.Core.Collection;
 /// <param name="PasswordMinimumLength">Minimum local password length, where readable.</param>
 /// <param name="PasswordComplexityEnabled">Whether complexity is enforced, where readable.</param>
 /// <param name="LockoutThreshold">Lockout threshold; <c>0</c> means no lockout.</param>
+/// <param name="PasswordHistorySize">Previous passwords that may not be reused; <c>0</c> means none.</param>
+/// <param name="PasswordMinimumAgeDays">Days a password must be held before it may be changed.</param>
+/// <param name="PasswordMaximumAgeDays">Days before a password expires; <c>-1</c> means never.</param>
+/// <param name="LockoutDurationMinutes">
+/// Minutes a locked account stays locked; <c>-1</c> means until an administrator unlocks it.
+/// </param>
+/// <param name="LockoutObservationWindowMinutes">Minutes over which failed attempts accumulate.</param>
 /// <param name="FirewallEnabled">Whether the host firewall is in force, where readable.</param>
 /// <param name="SecureBootEnabled">Whether verified boot is enforced, where readable.</param>
 /// <param name="TpmPresent">Whether a hardware security processor is present.</param>
@@ -34,6 +41,11 @@ public sealed record SupplementalReadings(
     int? PasswordMinimumLength = null,
     bool? PasswordComplexityEnabled = null,
     int? LockoutThreshold = null,
+    int? PasswordHistorySize = null,
+    int? PasswordMinimumAgeDays = null,
+    int? PasswordMaximumAgeDays = null,
+    int? LockoutDurationMinutes = null,
+    int? LockoutObservationWindowMinutes = null,
     bool? FirewallEnabled = null,
     bool? SecureBootEnabled = null,
     bool? TpmPresent = null,
@@ -74,7 +86,12 @@ public sealed record SupplementalReadings(
         if (existing is null
             && PasswordMinimumLength is null
             && PasswordComplexityEnabled is null
-            && LockoutThreshold is null)
+            && LockoutThreshold is null
+            && PasswordHistorySize is null
+            && PasswordMinimumAgeDays is null
+            && PasswordMaximumAgeDays is null
+            && LockoutDurationMinutes is null
+            && LockoutObservationWindowMinutes is null)
         {
             return null;
         }
@@ -83,7 +100,12 @@ public sealed record SupplementalReadings(
             existing?.LocalAdministratorNames,
             PasswordMinimumLength ?? existing?.PasswordMinimumLength,
             PasswordComplexityEnabled ?? existing?.PasswordComplexityEnabled,
-            LockoutThreshold ?? existing?.LockoutThreshold);
+            LockoutThreshold ?? existing?.LockoutThreshold,
+            PasswordHistorySize ?? existing?.PasswordHistorySize,
+            PasswordMinimumAgeDays ?? existing?.PasswordMinimumAgeDays,
+            PasswordMaximumAgeDays ?? existing?.PasswordMaximumAgeDays,
+            LockoutDurationMinutes ?? existing?.LockoutDurationMinutes,
+            LockoutObservationWindowMinutes ?? existing?.LockoutObservationWindowMinutes);
     }
 
     private AgentHardeningReading? MergeHardening(AgentHardeningReading? existing)
