@@ -59,7 +59,7 @@ public sealed class QueryPackOrderTests
     {
         ["linux.json"] = 7,
         ["macos.json"] = 10,
-        ["windows.json"] = 16,
+        ["windows.json"] = 17,
     };
 
     [Theory]

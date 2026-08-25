@@ -51,21 +51,21 @@ public static class HostReader
     }
 
     /// <summary>
-    /// Reads the Windows local password policy from <c>net accounts</c>.
+    /// Reads the Windows local password and lockout policy from <c>net accounts</c>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>osquery has no table for this, and the LOCAL policy is the one that matters here.</b> A
-    /// workgroup machine gets none of a directory's password rules, and a workgroup machine is
-    /// exactly what an organisation without an MDM tends to be running — so leaving this uncollected
-    /// would gut A.5.17 for the fleet the agent exists to reach.
+    /// <b>Running the command lives here; deciding what its output MEANS lives in
+    /// <see cref="WindowsPasswordPolicy"/>.</b> The split is what makes the sentinel handling — where
+    /// a "not observed" could quietly become an observed number — reachable from a test, and it is
+    /// the same split <see cref="SupplementalReadings.MergeInto"/> already exists for.
     /// </para>
     /// <para>
-    /// <b>Complexity is deliberately NOT reported.</b> <c>net accounts</c> does not expose it; only
-    /// <c>secedit /export</c> does, which writes a temporary file containing far more of the
-    /// security policy than is wanted. Reporting <c>null</c> here is honest, and Merlin's rule
-    /// treats an unreported half as not-failing rather than inventing a <c>false</c> that would fail
-    /// every machine.
+    /// <b>Complexity does not come from here — it comes from osquery's
+    /// <c>security_profile_info</c>.</b> <c>net accounts</c> genuinely does not print it, but the
+    /// SCE API behind <c>secedit</c> does, and osquery calls that in process rather than running
+    /// the CLI that would leave a file behind. This reader still reports <c>null</c> for it, and
+    /// the merge coalesces so the table's answer wins.
     /// </para>
     /// </remarks>
     [SupportedOSPlatform("windows")]
@@ -73,43 +73,7 @@ public static class HostReader
     {
         string? output = CommandRunner.Run("net", ["accounts"], deadline.Clamp(_timeout));
 
-        if (output is null)
-        {
-            return new SupplementalReadings();
-        }
-
-        int? minimumLength = null;
-        int? lockoutThreshold = null;
-
-        foreach (string line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-        {
-            int separator = line.LastIndexOf(':');
-
-            if (separator < 0)
-            {
-                continue;
-            }
-
-            string label = line[..separator].Trim();
-            string value = line[(separator + 1)..].Trim();
-
-            if (label.Contains("Minimum password length", StringComparison.OrdinalIgnoreCase))
-            {
-                minimumLength = ParseCount(value);
-            }
-            else if (label.Contains("Lockout threshold", StringComparison.OrdinalIgnoreCase))
-            {
-                // "Never" means no lockout is enforced, which is an OBSERVATION of zero rather than
-                // an absence of data — distinct from a line that could not be parsed at all.
-                lockoutThreshold = value.StartsWith("Never", StringComparison.OrdinalIgnoreCase)
-                    ? 0
-                    : ParseCount(value);
-            }
-        }
-
-        return new SupplementalReadings(
-            PasswordMinimumLength: minimumLength,
-            LockoutThreshold: lockoutThreshold);
+        return output is null ? new SupplementalReadings() : WindowsPasswordPolicy.Parse(output);
     }
 
     /// <summary>

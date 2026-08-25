@@ -293,11 +293,42 @@ public static class WindowsNormaliser
     private static AgentAccountsReading? Accounts(OsqueryResults results)
     {
         IReadOnlyList<string>? admins = AccountNames(results.Rows("local_admins"), "username");
+        bool? complexity = PasswordComplexity(results);
 
-        // Password policy is filled in by the Windows collector from `net accounts`, not by osquery,
-        // which has no table for the local SAM policy. Left null here and merged afterwards.
-        return admins is null ? null : new AgentAccountsReading(admins, null, null, null);
+        // The NUMERIC password policy is filled in by the Windows collector from `net accounts`,
+        // which osquery has no equivalent for at the SAM level. Left null here and merged
+        // afterwards. Complexity is the one half that comes from a table.
+        return admins is null && complexity is null
+            ? null
+            : new AgentAccountsReading(admins, null, complexity, null);
     }
+
+    /// <summary>
+    /// Reads whether local passwords must meet complexity requirements.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>ONLY 0 AND 1 ARE ANSWERS.</b> osquery clamps the SCE "no value" sentinel to <c>-1</c>, so
+    /// a machine whose policy could not be read reports <c>-1</c> — and reading that as
+    /// <c>false</c> would fail it against a value nobody measured. That is the exact inversion
+    /// Merlin's not-observed rule exists to prevent, and it is worth a switch of its own rather
+    /// than leaning on <c>ParseBool</c> happening not to recognise "-1" today.
+    /// </para>
+    /// <para>
+    /// <b>The rest of the local password policy is deliberately NOT taken from this table</b>, even
+    /// though it carries length, both ages, history and the lockout threshold and would be immune
+    /// to the English-label matching `net accounts` needs. Its <c>maximum_password_age</c> of
+    /// <c>-1</c> cannot be told apart from "not configured", where `net accounts` prints the word
+    /// "Unlimited" unambiguously. One value, one source.
+    /// </para>
+    /// </remarks>
+    private static bool? PasswordComplexity(OsqueryResults results) =>
+        ParseInt(results.Value("password_complexity", "password_complexity")) switch
+        {
+            1 => true,
+            0 => false,
+            _ => null,
+        };
 
     private static AgentCapacityReading? Capacity(OsqueryResults results)
     {

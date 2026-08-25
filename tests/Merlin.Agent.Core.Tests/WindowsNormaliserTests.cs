@@ -275,6 +275,59 @@ public sealed class WindowsNormaliserTests
     }
 
     [Theory]
+    [InlineData("1", true)]
+    [InlineData("0", false)]
+    [InlineData("-1", null)]
+    [InlineData("", null)]
+    [InlineData("yes", null)]
+    public void PasswordComplexityIsOnlyEverReadFromAZeroOrAOne(string reported, bool? expected)
+    {
+        // -1 is osquery's clamp of the SCE "no value" sentinel — the policy could not be read, NOT
+        // that complexity is off. Reading it as false would fail the machine against a value nobody
+        // measured, which is the inversion this whole module exists to prevent. Anything else
+        // unrecognised degrades the same way.
+        OsqueryResults results = new();
+        results.Add("password_complexity", [Row(("password_complexity", reported))]);
+
+        Assert.Equal(expected, Build(results).Accounts?.PasswordComplexityEnabled);
+    }
+
+    [Fact]
+    public void ComplexityIsReportedEvenWhenTheAdministratorListCouldNotBeRead()
+    {
+        // The two halves of the accounts section come from different queries and fail
+        // independently. Returning null for the whole section because one of them was empty would
+        // discard a reading that was taken successfully.
+        OsqueryResults results = new();
+        results.Add("password_complexity", [Row(("password_complexity", "1"))]);
+
+        AgentAccountsReading accounts = Build(results).Accounts!;
+
+        Assert.True(accounts.PasswordComplexityEnabled);
+        Assert.Null(accounts.LocalAdministratorNames);
+    }
+
+    [Fact]
+    public void TheNumericPasswordPolicyIsNeverTakenFromTheSecurityProfileTable()
+    {
+        // It carries length, both ages, history and the lockout threshold too, and taking them
+        // would be tempting because they need no English label matching. But its
+        // maximum_password_age of -1 cannot be told apart from "not configured", where
+        // `net accounts` prints the word "Unlimited". One value, one source — so osquery must
+        // contribute complexity and nothing else.
+        OsqueryResults results = new();
+        results.Add("password_complexity", [Row(("password_complexity", "1"))]);
+
+        AgentAccountsReading accounts = Build(results).Accounts!;
+
+        Assert.Null(accounts.PasswordMinimumLength);
+        Assert.Null(accounts.PasswordMaximumAgeDays);
+        Assert.Null(accounts.PasswordMinimumAgeDays);
+        Assert.Null(accounts.PasswordHistorySize);
+        Assert.Null(accounts.LockoutThreshold);
+    }
+
+    [Theory]
     [InlineData("10", "Laptop")]
     [InlineData("3", "Desktop")]
     [InlineData("23", "Server")]
