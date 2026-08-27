@@ -131,6 +131,18 @@ public static class WindowsNormaliser
             {
                 method = DiskEncryptionMethod.NotObserved;
             }
+            else if (protection == 2)
+            {
+                // PROTECTION_STATUS 2 IS "UNKNOWN — VOLUME LOCKED", NOT "UNPROTECTED". A locked
+                // volume is one the agent could not inspect, so the honest answer is NOT OBSERVED.
+                // Falling through to the branch below graded it as encryption OFF and manufactured
+                // a nonconformity against a machine that may be correctly encrypted — which is the
+                // dangerous direction, because a machine wrongly failing gets chased and a machine
+                // wrongly passing gets certified.
+                //
+                // The four-state enum exists precisely so this case does not collapse into None.
+                method = DiskEncryptionMethod.NotObserved;
+            }
             else if (protection == 1)
             {
                 // The volume IS encrypted whichever edition this is, and that is the fact the
@@ -154,10 +166,19 @@ public static class WindowsNormaliser
                 };
             }
 
+            // `Protected` IS THE RAW OBSERVATION; `Method` IS THE GRADED CONCLUSION. They differ
+            // on purpose — an unprotected volume whose EDITION could not be read still reports
+            // Protected = false, because the encryption state itself WAS read and only the grading
+            // is withheld. Deriving the bool from the method collapses that, and three existing
+            // tests say so.
+            //
+            // What has to change is narrower: status 2 means the status is UNKNOWN, so
+            // `protection == 1` reports FALSE for a locked volume — the same untrue statement one
+            // field over, and the one a consumer reading the bool rather than the enum acts on.
             volumes.Add(new AgentVolumeReading(
                 volume,
                 method,
-                protection is null ? null : protection == 1,
+                protection is null or 2 ? null : protection == 1,
                 percent));
         }
 
