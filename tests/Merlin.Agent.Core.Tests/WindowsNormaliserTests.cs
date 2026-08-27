@@ -84,6 +84,30 @@ public sealed class WindowsNormaliserTests
         Assert.Equal(DiskEncryptionMethod.NotSupportedOnEdition, volume.Method);
     }
 
+    [Theory]
+    [InlineData("Professional")]
+    [InlineData("Core")]
+    public void ALockedVolumeIsNotObservedWhateverTheEdition(string edition)
+    {
+        // PROTECTION_STATUS 2 IS "UNKNOWN — VOLUME LOCKED", NOT "UNPROTECTED". The agent could not
+        // inspect it, so the honest answer is NOT OBSERVED — on Pro it was being graded as
+        // encryption switched OFF, which manufactures a nonconformity against a machine that may
+        // be correctly encrypted, and on Home it was excused as a licensing fact, which is a
+        // different untrue statement about the same volume.
+        OsqueryResults results = new();
+        results.Add("os_edition", [Row(("data", edition))]);
+        results.Add("bitlocker", [Row(("drive_letter", "C:"), ("protection_status", "2"))]);
+
+        AgentVolumeReading volume = Assert.Single(Build(results).Encryption!);
+
+        Assert.Equal(DiskEncryptionMethod.NotObserved, volume.Method);
+
+        // The BOOLEAN has to follow the method. `protection_status == 1` alone reports FALSE for a
+        // locked volume — the same untrue statement one field over, and the one a consumer reading
+        // the bool rather than the enum would act on.
+        Assert.Null(volume.Protected);
+    }
+
     [Fact]
     public void AnUnprotectedVolumeOnProIsAFailure()
     {

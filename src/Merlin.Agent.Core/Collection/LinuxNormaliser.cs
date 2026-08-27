@@ -137,21 +137,36 @@ public static class LinuxNormaliser
     /// membership of <c>sudo</c>, <c>wheel</c> or <c>admin</c> depending on the distribution, and
     /// separately from any account with uid 0. Reading only one of the two would let a second root
     /// account — the more serious finding of the pair — go uncounted.
+    /// <para>
+    /// <b>BOTH SOURCES ARE REQUIRED, and the guard is <c>||</c> rather than <c>&amp;&amp;</c>.</b>
+    /// The two feed ONE derived value — the administrator COUNT — so a union missing half its
+    /// input does not degrade, it UNDER-REPORTS. Merlin's rule meets its criterion at two or
+    /// fewer, so a machine that loses one query can drop under the threshold and flip from
+    /// <c>DoesNotMeet</c> to <c>Meets</c>: the ISMS then asserts a control is operating on
+    /// evidence it does not have. A false pass is invisible and gets certified, where a false
+    /// failure is visible and gets chased.
+    /// </para>
+    /// <para>
+    /// <b>This is why the bug looked like the code around it.</b> The other <c>&amp;&amp;</c>
+    /// guards in these normalisers combine INDEPENDENT signals into one reading whose fields are
+    /// each separately nullable — there, "all absent means absent" is right. Here the sources are
+    /// not independent, and only the whole union is a reading.
+    /// </para>
     /// </remarks>
     private static AgentAccountsReading? Accounts(OsqueryResults results)
     {
         IReadOnlyList<string>? sudoers = AccountNames(results.Rows("local_admins"), "username");
         IReadOnlyList<string>? roots = AccountNames(results.Rows("root_accounts"), "username");
 
-        if (sudoers is null && roots is null)
+        if (sudoers is null || roots is null)
         {
             return null;
         }
 
         List<string> combined =
         [
-            .. (sudoers ?? [])
-                .Concat(roots ?? [])
+            .. sudoers
+                .Concat(roots)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Order(StringComparer.OrdinalIgnoreCase),
         ];

@@ -116,6 +116,35 @@ public sealed class LinuxNormaliserTests
     }
 
     [Fact]
+    public void AnAdministratorQueryThatDidNotRunMakesTheWholeReadingNotObserved()
+    {
+        OsqueryResults results = new();
+
+        // The group query ran and found one member. The uid-0 query did NOT run — no rows at all,
+        // which in this collector's contract means the table could not be read.
+        results.Add("local_admins", [Row(("username", "alice"))]);
+
+        // NOT ["alice"]. The two sources feed one derived value — the administrator COUNT — so a
+        // union missing half its input under-reports rather than degrading. Merlin's rule meets
+        // its criterion at two or fewer, so reporting one here flips the machine to Meets on
+        // evidence nobody has: a false pass, which is invisible and gets certified.
+        Assert.Null(Build(results).Accounts);
+    }
+
+    [Fact]
+    public void TheUidZeroQueryAloneAlsoMakesTheReadingNotObserved()
+    {
+        OsqueryResults results = new();
+
+        // The mirror. Every Linux machine has a root account, so root_accounts returning rows
+        // while local_admins returns none is the commoner shape of the same failure — and the one
+        // that under-reports hardest, because the sudo group is where the extra admins live.
+        results.Add("root_accounts", [Row(("username", "root"))]);
+
+        Assert.Null(Build(results).Accounts);
+    }
+
+    [Fact]
     public void TheDistributionIdTravelsSeparatelyFromTheMarketingName()
     {
         OsqueryResults results = new();
