@@ -15,12 +15,20 @@ namespace Merlin.Agent.Core.Collection;
 /// fleet rather than the occasional one.
 /// </para>
 /// <para>
-/// <b>Three readings are deliberately left unobserved on macOS, and each is a real gap rather than
-/// an oversight.</b> Screen-lock idle timeout, patch currency and antimalware signature age have no
-/// machine-scope source on an unmanaged Mac — they are per-user preferences or require a network
-/// round trip the agent will not make. Merlin renders them as not observed, which is the honest
-/// answer; inventing a value would make a Mac look either compliant or non-compliant on evidence
-/// that does not exist. See <c>docs/collection-manifest.md</c>.
+/// <b>Two readings are deliberately left unobserved on macOS, and each is a real gap rather than an
+/// oversight.</b> The screen-lock idle timeout is a per-user preference — osquery's
+/// <c>screenlock</c> table reads the logged-in user's context and this agent runs as root from a
+/// launch daemon, and the only other route names a person and opens their home directory, which
+/// <c>HostReader</c> forbids. Antimalware signature age has no locally readable "current" version to
+/// compare XProtect against. Merlin renders both as not observed, which is the honest answer;
+/// inventing a value would make a Mac look either compliant or non-compliant on evidence that does
+/// not exist.
+/// </para>
+/// <para>
+/// <b><see cref="AgentReportPayload.Patching"/> is null HERE and filled by the supplemental
+/// reading.</b> osquery has no macOS patch table, but the machine-scope software-update preferences
+/// carry the date an update last succeeded, so patch currency is observed as an AGE rather than
+/// left blank — see <c>MacOsSoftwareUpdate</c> and <c>docs/collection-manifest.md</c>.
 /// </para>
 /// </remarks>
 public static class MacOsNormaliser
