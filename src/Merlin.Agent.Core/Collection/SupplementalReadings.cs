@@ -9,7 +9,8 @@ namespace Merlin.Agent.Core.Collection;
 /// <remarks>
 /// <para>
 /// <b>Every one of these exists because osquery has no table for it.</b> Windows reads its local
-/// password policy from <c>net accounts</c>; macOS reads its from <c>pwpolicy</c>; Linux reads the
+/// password policy from <c>net accounts</c>; macOS reads its from <c>pwpolicy</c> and its patch
+/// currency from the software-update preferences; Linux reads the
 /// host firewall, Secure Boot, TPM presence and package-manager activity straight from
 /// <c>/sys</c>, <c>/etc</c> and <c>/var</c>. None of that is available through a query.
 /// </para>

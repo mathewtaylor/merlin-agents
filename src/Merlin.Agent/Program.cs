@@ -639,7 +639,12 @@ public static class Program
     private static string[] SupplementalManifest() => AgentPlatformInfo.Current switch
     {
         AgentOs.Windows => ["net accounts — the local password and lockout policy"],
-        AgentOs.MacOs => ["pwpolicy -getaccountpolicies — the local password policy"],
+        AgentOs.MacOs =>
+        [
+            "pwpolicy -getaccountpolicies — the local password policy",
+            "defaults read /Library/Preferences/com.apple.SoftwareUpdate LastSuccessfulDate — "
+                + "when a software update last succeeded",
+        ],
         _ =>
         [
             "/etc/security/pwquality.conf and /etc/login.defs — the local password policy",

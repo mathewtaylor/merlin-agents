@@ -77,7 +77,8 @@ public static class HostReader
     }
 
     /// <summary>
-    /// Reads the macOS local password policy from <c>pwpolicy</c>.
+    /// Reads the macOS local password policy from <c>pwpolicy</c>, and patch currency from the
+    /// machine-scope software-update preferences.
     /// </summary>
     /// <remarks>
     /// <b>An unrecognised or empty policy set reports <c>null</c>, NOT a minimum length of zero.</b>
@@ -91,12 +92,30 @@ public static class HostReader
     /// </remarks>
     private static SupplementalReadings ReadMacOs(CollectionDeadline deadline)
     {
-        string? output = CommandRunner.Run("/usr/bin/pwpolicy", ["-getaccountpolicies"], deadline.Clamp(_timeout));
+        string? policy = CommandRunner.Run("/usr/bin/pwpolicy", ["-getaccountpolicies"], deadline.Clamp(_timeout));
 
-        return output is null
-            ? new SupplementalReadings()
-            : new SupplementalReadings(
-                PasswordMinimumLength: FindKeyedInteger(output, "policyAttributeMinimumLength"));
+        // PATCH CURRENCY, from the machine-scope software-update preferences. macOS exposes no
+        // pending-update count through osquery and `softwareupdate --list` needs a network round
+        // trip this agent will not make on somebody's machine — but the date of the last successful
+        // update is sitting in a root-owned plist, costs nothing to read, and answers the question
+        // Merlin's patch check actually grades. See MacOsSoftwareUpdate for why it is this key and
+        // not the install history.
+        //
+        // The DOMAIN IS AN ABSOLUTE PATH, which is what keeps this machine-scope: `defaults read
+        // com.apple.SoftwareUpdate` resolves against the CALLING user's preferences, and the agent
+        // runs as root from a launch daemon, so the short form would read root's own domain and
+        // find nothing. It also keeps the rule at the top of this file intact — no home directory
+        // is touched and no username is named.
+        string? lastUpdate = CommandRunner.Run(
+            "/usr/bin/defaults",
+            ["read", "/Library/Preferences/com.apple.SoftwareUpdate", "LastSuccessfulDate"],
+            deadline.Clamp(_timeout));
+
+        return new SupplementalReadings(
+            PasswordMinimumLength: policy is null
+                ? null
+                : FindKeyedInteger(policy, "policyAttributeMinimumLength"),
+            LastUpdateInstalledAt: MacOsSoftwareUpdate.Parse(lastUpdate).LastUpdateInstalledAt);
     }
 
     /// <summary>

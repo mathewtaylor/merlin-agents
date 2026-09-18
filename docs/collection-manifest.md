@@ -40,6 +40,7 @@ worse promise than no manifest. `merlin-agent status --manifest` prints this lis
 |---|---|---|
 | Windows | `net accounts` | Minimum password length, password history size, minimum and maximum password age, lockout threshold, lockout duration, lockout observation window |
 | macOS | `pwpolicy -getaccountpolicies` | Minimum password length |
+| macOS | `defaults read /Library/Preferences/com.apple.SoftwareUpdate LastSuccessfulDate` | When a macOS software update last succeeded |
 | Linux | `/etc/security/pwquality.conf`, `/etc/login.defs` | Minimum password length, complexity |
 | Linux | `/sys/firmware/efi/efivars/SecureBoot-*` | Whether Secure Boot is enforced |
 | Linux | `/sys/class/tpm/tpm0/tpm_version_major` | Whether a TPM is present, and its version |
@@ -89,9 +90,21 @@ several of these gaps are structural rather than temporary.
   reports `grace_period`, the delay after the screensaver starts, not the idle time before it does.
   Reporting that as the lock timeout would understate the machine's exposure, so it is not reported.
   Only "the screen never requires a password" is sent, as an observed failure.
-- **Patch currency is not observed.** macOS exposes no pending-update count and no install history
-  through osquery, and `softwareupdate --list` needs a network round trip the agent will not make on
-  a user's machine.
+- **Patch currency is reported as an AGE, never as a pending count.** macOS exposes no pending-update
+  count through osquery and `softwareupdate --list` needs a network round trip the agent will not
+  make on a user's machine — but `LastSuccessfulDate` in the machine-scope software-update
+  preferences says when an update last succeeded, which is the same question Windows' own fallback
+  answers and the one Merlin's patch check grades. The domain is given as an **absolute path**: the
+  short form resolves against the calling user's preferences, and the agent runs as root from a
+  launch daemon.
+  - **The install history is deliberately not used.** `/Library/Receipts/InstallHistory.plist` is
+    machine-scope and readable too, but it records every installer that has ever run — a third-party
+    app update or an XProtect config-data drop would refresh the date on a machine that has never
+    taken an OS update, which is exactly the weakness noted below about package-manager activity on
+    Linux.
+  - **The pending count in the same file is deliberately not sent.** `LastUpdatesAvailable` is the
+    result of the last background scan, so its truth depends on when that scan ran, and it counts
+    updates of every kind into a field Merlin reads as pending SECURITY updates.
 - **Antimalware currency is not observed.** Gatekeeper's on/off state is read and is a genuine A.8.7
   signal, but XProtect definitions update through a channel with no locally readable "current"
   version to compare against. A third-party product on the machine is invisible to this reading.
