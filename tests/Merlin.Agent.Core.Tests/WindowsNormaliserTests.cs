@@ -366,4 +366,47 @@ public sealed class WindowsNormaliserTests
         // and a wrong guess ends up written into the A.5.9 inventory by whoever accepts it.
         Assert.Equal(expected, Build(results).ChassisType);
     }
+    [Fact]
+    public void TheLatestUpdateIsChosenByDateNotByTheTextOfTheDate()
+    {
+        // Windows reports installed_on as M/D/YYYY TEXT. Sorted as text, "2/23/2026" outranks
+        // "10/16/2026" — which is how a machine patched in October reported its last update as
+        // February. The rows arrive in the order osquery returns them, deliberately unsorted.
+        OsqueryResults results = new();
+        results.Add("patches",
+        [
+            Row(("hotfix_id", "KB5043080"), ("installed_on", "2/23/2026")),
+            Row(("hotfix_id", "KB5127648"), ("installed_on", "10/16/2026")),
+            Row(("hotfix_id", "KB5121003"), ("installed_on", "9/9/2026")),
+        ]);
+
+        Assert.Equal(
+            new DateTimeOffset(2026, 10, 16, 0, 0, 0, TimeSpan.Zero),
+            Build(results).Patching?.LastUpdateInstalledAt);
+    }
+
+    [Fact]
+    public void AnUnparseableInstallDateIsSkippedNotAllowedToHideTheRest()
+    {
+        OsqueryResults results = new();
+        results.Add("patches",
+        [
+            Row(("hotfix_id", "KB1"), ("installed_on", "")),
+            Row(("hotfix_id", "KB2"), ("installed_on", "not a date")),
+            Row(("hotfix_id", "KB3"), ("installed_on", "11/20/2026")),
+        ]);
+
+        Assert.Equal(
+            new DateTimeOffset(2026, 11, 20, 0, 0, 0, TimeSpan.Zero),
+            Build(results).Patching?.LastUpdateInstalledAt);
+    }
+
+    [Fact]
+    public void NoParseableInstallDateReportsPatchingAsNotObserved()
+    {
+        OsqueryResults results = new();
+        results.Add("patches", [Row(("hotfix_id", "KB1"), ("installed_on", ""))]);
+
+        Assert.Null(Build(results).Patching);
+    }
 }
