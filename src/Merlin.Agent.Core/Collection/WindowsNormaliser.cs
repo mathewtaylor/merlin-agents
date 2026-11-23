@@ -301,14 +301,35 @@ public static class WindowsNormaliser
 
     private static AgentPatchingReading? Patching(OsqueryResults results)
     {
-        string? installedOn = results.Value("patches", "installed_on");
+        // THE LATEST DATE IS CHOSEN HERE, AFTER PARSING — NEVER BY THE QUERY. Windows reports
+        // installed_on as M/D/YYYY TEXT, so an ORDER BY sorts it alphabetically: "2/23/2026"
+        // outranks "10/16/2026". Windows also removes superseded cumulative updates from the list,
+        // so once October's replaced September's, a machine patched in October reported a February
+        // leftover as its last update and failed the patch check by nine months. Every row is read
+        // and an unparseable date is skipped rather than allowed to stand in for the rest.
+        DateTimeOffset? latest = null;
+
+        foreach (Dictionary<string, string> row in results.Rows("patches"))
+        {
+            if (!row.TryGetValue("installed_on", out string? installedOn))
+            {
+                continue;
+            }
+
+            DateTimeOffset? parsed = ParseDate(installedOn?.Trim());
+
+            if (parsed is not null && (latest is null || parsed > latest))
+            {
+                latest = parsed;
+            }
+        }
 
         // The count of PENDING updates is deliberately absent in v1: osquery has no table for it,
         // and the Windows Update COM API is a dependency this agent does not want. Merlin's patch
         // rule falls back to the age of the last installed update, which IS observable here.
-        return installedOn is null
+        return latest is null
             ? null
-            : new AgentPatchingReading(null, ParseDate(installedOn));
+            : new AgentPatchingReading(null, latest);
     }
 
     private static AgentAccountsReading? Accounts(OsqueryResults results)

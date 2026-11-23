@@ -58,8 +58,8 @@
       "purpose": "The machine-wide inactivity lock timeout (A.7.7 clear screen)."
     },
     "patches": {
-      "sql": "SELECT hotfix_id, installed_on FROM patches ORDER BY installed_on DESC LIMIT 5;",
-      "purpose": "When an update was last installed. A count of PENDING updates is not collected in v1 \u2014 see docs/collection-manifest.md."
+      "sql": "SELECT hotfix_id, installed_on FROM patches;",
+      "purpose": "When an update was last installed \u2014 EVERY row, because installed_on is M/D/YYYY text and sorting it in SQL is alphabetical; the agent picks the latest after parsing. A count of PENDING updates is not collected in v1 \u2014 see docs/collection-manifest.md."
     },
     "os_version": {
       "sql": "SELECT name, version, build, platform FROM os_version;",
