@@ -10,7 +10,7 @@ namespace Merlin.Agent.Core.Update;
 /// really has gone dark comes back the next day.
 /// </param>
 /// <param name="Updater">
-/// The updater runs daily, so seventy-two is three missed runs. Wider than the agent's on purpose:
+/// The updater runs every six hours, so seventy-two is twelve missed runs. Wider than the agent's on purpose:
 /// a machine off for a weekend is ordinary, and a spurious revert costs a working binary.
 /// </param>
 public sealed record UpdateWindows(TimeSpan Agent, TimeSpan Updater)

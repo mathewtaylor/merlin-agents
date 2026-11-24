@@ -204,8 +204,8 @@ do, because the update answer described below is not signed and TLS is the only 
 it in transit.
 
 **Both binaries ask about updates, not just the updater.** Each takes the same turn against the
-same signed `GET` — the updater once a day, and the agent on every collection, which is every six
-hours with no minimum interval of its own. So a device issues that request about five times a day,
+same signed `GET` — the updater every six hours, and the agent on every collection, which is also every six
+hours with no minimum interval of its own. So a device issues that request about eight times a day,
 and either component may follow it with a download from an allowlisted release host: the updater
 fetches a package to replace the agent, and the agent fetches one to replace the updater. Nothing
 else is contacted, ever.

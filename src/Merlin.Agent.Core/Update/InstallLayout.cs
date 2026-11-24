@@ -17,7 +17,7 @@ public enum AgentComponent
     Agent,
 
     /// <summary>
-    /// <c>merlin-updater</c> — checks daily whether Merlin advertises a different version, and
+    /// <c>merlin-updater</c> — checks every six hours whether Merlin advertises a different version, and
     /// replaces the agent.
     /// </summary>
     Updater,

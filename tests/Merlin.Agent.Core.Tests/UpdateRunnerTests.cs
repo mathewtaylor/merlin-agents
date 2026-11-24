@@ -33,7 +33,7 @@ public sealed class UpdateRunnerTests
             UpdateTestKit.ProbeReporting(AgentVersionInfo.Current));
 
         // 204 is the ORDINARY answer: already current, ring not due, or no version configured.
-        // Recording a failure for it would have a healthy fleet reporting a broken update daily.
+        // Recording a failure for it would have a healthy fleet reporting a broken update on every run.
         Assert.Null(after.LastUpdateOutcome);
         Assert.Equal("agent", File.ReadAllText(kit.Layout.PathOf(AgentComponent.Agent)));
     }
@@ -423,7 +423,7 @@ public sealed class UpdateRunnerTests
     /// <b>Stacking an unproven swap on an unproven swap breaks recovery in two ways at once.</b>
     /// It resets the mark a revert is timed from, so the window restarts every run and the revert
     /// never fires — an antivirus engine that quarantines the installed binary but not the freshly
-    /// downloaded one produces exactly that, and the machine re-downloads and re-swaps daily for
+    /// downloaded one produces exactly that, and the machine re-downloads and re-swaps on every run for
     /// ever. And <c>Commit</c> retains only the IMMEDIATELY preceding binary, so the second swap
     /// overwrites the retained copy with the unproven one: the last binary known to work is gone,
     /// and a revert would put back something that never ran either.
