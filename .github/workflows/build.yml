@@ -244,8 +244,8 @@ jobs:
             echo "collection manifests, so the two components can never be on versions that were"
             echo "never tested together."
             echo
-            echo "The agent collects every six hours and replaces the **updater**; the updater runs"
-            echo "daily and replaces the **agent**. Neither ever replaces its own running image,"
+            echo "The agent collects every six hours and replaces the **updater**; the updater also"
+            echo "runs every six hours and replaces the **agent**. Neither ever replaces its own running image,"
             echo "which is what lets either put the other's previous binary back."
             echo
             echo "## Merlin configuration"

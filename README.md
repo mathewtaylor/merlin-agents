@@ -39,7 +39,7 @@ each platform you have configured. The installer:
 1. downloads and hash-verifies the agent and osquery,
 2. enrols the machine (generating a signing key that never leaves it),
 3. registers a scheduled task (Windows), launch daemon (macOS) or systemd timer (Linux) that
-   collects every six hours, and a second one that checks daily for a new version,
+   collects every six hours, and a second one that checks for a new version on the same cadence,
 4. runs one collection immediately, so the device appears straight away.
 
 The device then waits for an administrator to approve it. Until approved it counts towards no
@@ -53,8 +53,8 @@ accepts a report before keeping it, so a typo cannot silently take the machine o
 ## Keeping itself up to date
 
 **Two binaries that replace each other, and neither ever replaces itself.** `merlin-agent` runs
-every six hours and replaces `merlin-updater`; `merlin-updater` runs daily and replaces
-`merlin-agent`. Each can put the other's previous binary back if the one it installed does not run.
+every six hours and replaces `merlin-updater`; `merlin-updater` also runs every six hours
+and replaces `merlin-agent`. Each can put the other's previous binary back if the one it installed does not run.
 
 A single self-updating binary has one unrecoverable failure: if the image it swaps in cannot
 execute, nothing is left running on the machine to put the old one back — and this agent is a
@@ -104,7 +104,7 @@ merlin-agent rotate-key
 merlin-agent uninstall
 merlin-agent --version               # the version string; also how the other component probes it
 
-merlin-updater run                   # what the daily scheduled job runs; no-ops within 1 h of the last
+merlin-updater run                   # what the scheduled job runs (every 6 h); no-ops within 1 h of the last
 merlin-updater run --now             # check immediately, bypassing that hour, and say what happened
 merlin-updater status                # both components' versions and the last outcome
 merlin-updater --version             # as above
@@ -140,7 +140,7 @@ signal that cannot be read is reported as *not observed*, which Merlin will not 
 | | |
 |---|---|
 | Idle footprint | 0 MB, 0% CPU — no resident process |
-| Active | ~2–3 s every 6 hours; each collection also takes an update turn, and the updater takes one daily |
+| Active | ~2–3 s every 6 hours; each collection also takes an update turn, and the updater takes its own every 6 hours |
 | Install size | ~12 MB agent + ~7 MB updater + osquery |
 | Platforms | Windows (Home, Pro, Enterprise, Server), macOS (Apple silicon), Linux |
 | Architectures | `win-x64`, `osx-arm64`, `linux-x64`, `linux-arm64` |
