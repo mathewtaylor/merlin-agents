@@ -62,8 +62,20 @@ public static class WindowsNormaliser
             Hardening: Hardening(results),
             Patching: Patching(results),
             Accounts: Accounts(results),
-            Capacity: Capacity(results));
+            Capacity: Capacity(results),
+            Software: SoftwareInventoryReader.Read(results, _software));
     }
+
+    /// <summary>
+    /// The installed-programs list, as Add/Remove Programs shows it.
+    /// </summary>
+    /// <remarks>
+    /// osquery's <c>programs</c> table also reads per-user installs from loaded user hives. Only
+    /// the name, version and publisher are selected, so nothing says WHOSE hive a program came from
+    /// — the machine's inventory includes it, the person is not named.
+    /// </remarks>
+    private static readonly SoftwareSource[] _software =
+        [new("software", "name", "version", "publisher")];
 
     /// <summary>
     /// Reads one value out of the Entra join-info rows.

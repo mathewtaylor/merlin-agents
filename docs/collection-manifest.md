@@ -57,7 +57,15 @@ never becomes a pass or a failure.
 
 ### All platforms
 
-- **Installed software is not collected.** Deliberate — see [privacy.md](privacy.md).
+- **Installed software is name, version and publisher only**, and is kept only by a deployment
+  that has switched software inventory on — see [privacy.md](privacy.md) § Software inventory.
+  macOS sends no publisher (a bundle has none) and Debian-family Linux sends none either (the only
+  candidate, the maintainer, is often a person). An approved-list entry that names a publisher
+  therefore never matches those machines; leave the publisher blank for software they run.
+- **An inventory is bounded** at 5,000 items and about 450,000 characters, so a very large one
+  cannot push the report past Merlin's body limit and cost the machine its posture readings. A list
+  cut short loses its tail. A query that returns nothing sends no list at all, which Merlin reads
+  as not observed and leaves the previous list in place.
 
 ### Windows
 
@@ -173,6 +181,6 @@ make large packages permanently uninstallable on a slow link.
 
 **When it is reached, whatever has not run is reported as NOT OBSERVED** — the same null a missing
 table produces, never a negative reading. **The packs are therefore ordered security-posture first
-and inventory last**, so what a slow machine gives up is its hostname and chassis type rather than
-its disk encryption or its firewall. The order in `queries/<platform>.json` is the order they run
+and inventory last**, so what a slow machine gives up is its software list, hostname and chassis
+type rather than its disk encryption or its firewall. The software queries are the very last. The order in `queries/<platform>.json` is the order they run
 in, and `merlin-agent status --manifest` prints them in that order.

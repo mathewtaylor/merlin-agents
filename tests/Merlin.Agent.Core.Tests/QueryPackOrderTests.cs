@@ -34,10 +34,10 @@ public sealed class QueryPackOrderTests
     /// </remarks>
     private static readonly Dictionary<string, string[]> _inventory = new(StringComparer.Ordinal)
     {
-        ["linux.json"] = ["system_volume", "system_info"],
-        ["macos.json"] = ["system_volume", "system_info"],
+        ["linux.json"] = ["system_volume", "system_info", "software_deb", "software_rpm"],
+        ["macos.json"] = ["system_volume", "system_info", "software"],
         ["windows.json"] =
-            ["system_drive", "system_info", "machine_guid", "chassis", "entra_join"],
+            ["system_drive", "system_info", "machine_guid", "chassis", "entra_join", "software"],
     };
 
     /// <summary>
@@ -57,9 +57,9 @@ public sealed class QueryPackOrderTests
     /// </remarks>
     private static readonly Dictionary<string, int> _expectedCount = new(StringComparer.Ordinal)
     {
-        ["linux.json"] = 7,
-        ["macos.json"] = 10,
-        ["windows.json"] = 17,
+        ["linux.json"] = 9,
+        ["macos.json"] = 11,
+        ["windows.json"] = 18,
     };
 
     [Theory]

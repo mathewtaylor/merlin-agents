@@ -269,6 +269,14 @@ public sealed record AgentUpdateResponse(string Version, string PackageEndpoint,
 /// — so the only way to find out why a machine would not update was to get a shell on it, which is
 /// exactly the machine you cannot reach.
 /// </param>
+/// <param name="Software">
+/// The software installed on the machine — name, version and publisher, nothing else — or
+/// <c>null</c> when the inventory query could not run or returned nothing. <b>Always sent;
+/// Merlin decides whether to keep it.</b> Software inventory is opt-in per deployment and there is
+/// no server-to-agent configuration channel to switch collection off (deliberately — see
+/// <see cref="AgentUpdateResponse"/>), so a server with inventory switched off drops this field
+/// before anything is stored. See <c>docs/privacy.md</c> § software inventory.
+/// </param>
 public sealed record AgentReportPayload(
     DateTimeOffset CollectedAt,
     string AgentVersion,
@@ -291,7 +299,26 @@ public sealed record AgentReportPayload(
     AgentCapacityReading? Capacity,
     string? UpdaterVersion = null,
     string? LastUpdateOutcome = null,
-    string? LastUpdateDetail = null);
+    string? LastUpdateDetail = null,
+    IReadOnlyList<AgentSoftwareItem>? Software = null);
+
+/// <summary>
+/// One installed program or package.
+/// </summary>
+/// <remarks>
+/// <b>Three columns, and the absence of the rest is the design.</b> No install path, no install
+/// date, no uninstall command, no per-user attribution and no package maintainer — an install path
+/// under a home directory names the person, and a Debian maintainer field is frequently a person's
+/// name and mail address. The query packs name exactly these columns, so nothing else is ever
+/// returned to the agent.
+/// </remarks>
+/// <param name="Name">The display name — <c>Example Browser</c>, <c>openssl</c>.</param>
+/// <param name="Version">The installed version, or null when the platform records none.</param>
+/// <param name="Publisher">
+/// The publisher or vendor where the platform records one as a company — Windows programs and RPM
+/// packages. Null on macOS (no such column) and on Debian-family Linux (deliberately: see remarks).
+/// </param>
+public sealed record AgentSoftwareItem(string Name, string? Version, string? Publisher);
 
 /// <summary>
 /// Operating-system readings.

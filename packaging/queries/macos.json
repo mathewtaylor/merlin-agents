@@ -99,6 +99,18 @@
     "system_info": {
       "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model FROM system_info;",
       "purpose": "Machine identity, and the serial used to reconcile against the asset register."
+    },
+    "software": {
+      "$comment": [
+        "THE SOFTWARE INVENTORY, and the last query on purpose: it is the largest and the one a",
+        "slow machine can most afford to lose. Exactly two columns. The apps table also carries",
+        "the bundle path, which for an app in a home directory's Applications folder names its",
+        "owner; it is not selected. macOS records no publisher for a bundle, so none is sent.",
+        "Always collected; Merlin keeps it only when the deployment has switched software",
+        "inventory on, and drops it otherwise."
+      ],
+      "sql": "SELECT name, bundle_short_version FROM apps;",
+      "purpose": "Installed applications, checked against the organisation's approved list (A.8.19)."
     }
   }
 }

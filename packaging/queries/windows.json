@@ -123,6 +123,18 @@
       ],
       "sql": "SELECT name, data FROM registry WHERE key LIKE 'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\CloudDomainJoin\\JoinInfo\\%' AND name IN ('DeviceId', 'TenantId');",
       "purpose": "The machine's Entra device id \u2014 the exact join key for fleet coverage. Absent on a workgroup machine, which is a true fact about the machine."
+    },
+    "software": {
+      "$comment": [
+        "THE SOFTWARE INVENTORY, and the last query on purpose: it is the largest and the one a",
+        "slow machine can most afford to lose. Exactly three columns. The programs table also",
+        "carries install_location, install_source, uninstall_string and per-user entries from",
+        "loaded user hives; none of the path columns is selected, so no home directory and no",
+        "user name is ever returned to the agent. Always collected; Merlin keeps it only when the",
+        "deployment has switched software inventory on, and drops it otherwise."
+      ],
+      "sql": "SELECT name, version, publisher FROM programs;",
+      "purpose": "Installed software, checked against the organisation's approved list (A.8.19)."
     }
   }
 }

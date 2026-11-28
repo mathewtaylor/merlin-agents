@@ -77,8 +77,22 @@ public static class MacOsNormaliser
             Hardening: Hardening(results),
             Patching: null,
             Accounts: Accounts(results),
-            Capacity: Capacity(results));
+            Capacity: Capacity(results),
+            Software: SoftwareInventoryReader.Read(
+                results, _software, SoftwareInventoryReader.WithoutAppSuffix));
     }
+
+    /// <summary>
+    /// The application bundles osquery's <c>apps</c> table finds.
+    /// </summary>
+    /// <remarks>
+    /// <b>No publisher on macOS.</b> A bundle carries an identifier (<c>com.example.browser</c>) and
+    /// no company name; sending the reversed domain as a "publisher" would invent a field the
+    /// approved list then has to match against. The path is not selected either, since an app under
+    /// a home directory's <c>Applications</c> folder would name its owner.
+    /// </remarks>
+    private static readonly SoftwareSource[] _software =
+        [new("software", "name", "bundle_short_version", PublisherColumn: null)];
 
     /// <summary>
     /// Reduces the machine's disks to one FileVault reading.

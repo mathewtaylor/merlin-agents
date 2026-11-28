@@ -84,6 +84,26 @@
     "system_info": {
       "sql": "SELECT hostname, uuid, hardware_serial, hardware_vendor, hardware_model, cpu_brand FROM system_info;",
       "purpose": "Machine identity, and the serial used to reconcile against the asset register."
+    },
+    "software_deb": {
+      "$comment": [
+        "THE SOFTWARE INVENTORY on Debian-family systems, last with its RPM twin on purpose: these",
+        "are the largest queries and the ones a slow machine can most afford to lose. Only",
+        "packages actually installed (not removed-with-config-left). The maintainer column is NOT",
+        "selected — it is a person's name and mail address as often as a project's. Always",
+        "collected; Merlin keeps it only when the deployment has switched software inventory on."
+      ],
+      "sql": "SELECT name, version FROM deb_packages WHERE status = 'install ok installed';",
+      "purpose": "Installed packages, checked against the organisation's approved list (A.8.19)."
+    },
+    "software_rpm": {
+      "$comment": [
+        "THE SOFTWARE INVENTORY on RPM-family systems. Empty on a Debian machine, as the query",
+        "above is on this one. `vendor` names the distributor, not a person, and is sent as the",
+        "publisher."
+      ],
+      "sql": "SELECT name, version, vendor FROM rpm_packages;",
+      "purpose": "Installed packages, checked against the organisation's approved list (A.8.19)."
     }
   }
 }

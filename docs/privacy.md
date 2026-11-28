@@ -53,6 +53,7 @@ them as *not observed*. [collection-manifest.md](collection-manifest.md) lists e
 | System volume free space | Capacity | A.8.6 | ✓ | ✓ | ✓ |
 | Entra device and tenant id (where joined) | Fleet-coverage join key | A.5.9 | ✓ | — | — |
 | Which agent and updater version this machine runs, and how the last self-update ended | So a fleet that has stopped updating itself is visible, and a failed update is never silent | A.8.8 | ✓ | ✓ | ✓ |
+| Installed software: name, version, publisher — **kept only where the deployment has switched it on** | Check installed software against the organisation's approved list | A.8.19 | ✓ | no publisher | no publisher on Debian |
 
 The last row is about the SOFTWARE, not about you: two version strings and one word — `Succeeded`,
 `Failed` or `Reverted` — describing what happened the last time one component replaced the other.
@@ -83,10 +84,30 @@ is checked against a SHA-256 fingerprint before anything is run.
 - process command lines
 - geolocation
 
-**Installed-software inventory is deliberately held back.** It is genuinely useful for A.8.19, and
-it is also the most privacy-sensitive item on the list — a list of everything on someone's machine
-says a great deal about them. If it ships it will be an explicit per-deployment opt-in with its own
-consent copy, not a quiet addition to the default manifest.
+## Software inventory
+
+A list of everything installed on a machine says a good deal about whoever uses it, so it is
+handled differently from every other reading.
+
+- **It is three columns and nothing else**: the program's name, its version and, where the platform
+  records one as a company, its publisher. No install path (an app under a home folder names its
+  owner), no install date, no uninstall command, no per-user attribution, and on Debian-family
+  Linux no package maintainer (often a person's name and mail address). The query packs select only
+  those columns, so the rest never reach the agent.
+- **Windows** reads the Add/Remove Programs list (osquery `programs`), which includes programs
+  installed for a single user from that user's registry hive — the program is listed, the person
+  is not. **macOS** reads application bundles (`apps`) with no publisher, because a bundle has none.
+  **Linux** reads the installed `deb` or `rpm` packages, sending an RPM's vendor (the distributor)
+  as its publisher.
+- **The agent always collects and sends it; your Merlin deployment decides whether to keep it.**
+  Software inventory is **off by default**, and only a Merlin Administrator can switch it on. While
+  it is off the server drops the list on arrival: it is not stored, and it is removed from the copy
+  of the report Merlin keeps. Switching it off deletes every list already held.
+- **Why not stop the agent sending it?** Merlin has no way to send a setting to a machine — the
+  only thing it ever tells an agent is which version to run (see [protocol.md](protocol.md)), and
+  that is kept deliberately narrow. Adding a channel for one switch would widen what a server can
+  tell a machine to do, which is the property this project protects hardest. The cost is that the
+  list crosses the wire to your own deployment even where it is not kept; it goes nowhere else.
 
 ---
 

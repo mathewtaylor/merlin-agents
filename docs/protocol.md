@@ -183,6 +183,22 @@ normally, so `agentVersion` says nothing; `updaterVersion` is the field that sho
 null when the updater is absent or will not run. Widening the payload is possible, but it is a wire
 change and is deliberately not made here.
 
+### `software`
+
+The installed-software inventory: a list of `{ "name", "version", "publisher" }` objects, with
+`version` and `publisher` omitted where the platform records none. **Omitted entirely when the
+inventory query returned nothing** — Merlin reads a missing list as not observed and keeps what it
+held, whereas an empty list would replace it. Bounded at 5,000 items and about 450,000 characters.
+
+The agent sends it on every report. **Merlin keeps it only where an Administrator has switched
+software inventory on**; otherwise the server drops it before anything is stored, including from
+the stored copy of the report. There is no way for the server to tell the agent not to send it,
+and that is deliberate — see `GET /api/agent/update` below for why the server says so little to a
+machine. A Merlin release predating the field ignores it — but also enforces the older 256 KB body
+limit, so a machine with a large inventory can be refused by one. Point an agent carrying this
+field only at a Merlin that accepts it; the server's own package manifest decides which agent
+version a deployment installs and advertises, so in practice the order is server first.
+
 **202** on acceptance.
 
 ## `GET /api/agent/update`
@@ -263,7 +279,7 @@ ever, refused every time, with nothing on the machine able to clear it.
 | Timestamp skew tolerance | ±300 s — **must stay above the agent's 30 s learn threshold** (below it, there is a band where the server refuses and the agent declines to relearn, which no run can climb out of) |
 | Largest clock correction an agent will adopt | ±100 years — the bound exists to keep the correction REPRESENTABLE, not to judge how wrong a clock may be. A machine whose clock never had the right time (a dead CMOS battery, a board with no RTC) is decades out and must still be correctable; a `serverTime` near the end of the representable range implies millennia and would make every later request throw before it was built |
 | Nonce cache window | the skew tolerance |
-| Maximum body | 256 KB |
+| Maximum body | 1 MiB (256 KB before Merlin carried software inventory) |
 | Report cadence | every 6 h, jittered |
 | Update-check cadence | the updater every 6 h, jittered by up to 1 h; the agent on every collection |
 | Minimum gap between scheduled updater checks | 1 h — `run --now` bypasses it |

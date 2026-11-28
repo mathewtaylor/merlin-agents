@@ -67,8 +67,23 @@ public static class LinuxNormaliser
             Hardening: null,
             Patching: null,
             Accounts: Accounts(results),
-            Capacity: Capacity(results));
+            Capacity: Capacity(results),
+            Software: SoftwareInventoryReader.Read(results, _software));
     }
+
+    /// <summary>
+    /// The two package databases. A machine has one or the other, so the empty one costs nothing.
+    /// </summary>
+    /// <remarks>
+    /// <b>A Debian package's maintainer is NOT sent as its publisher.</b> That field is a person's
+    /// name and mail address as often as it is a project's, so it is not even selected. An RPM's
+    /// <c>vendor</c> names the distributor (Red Hat, Fedora Project) and is sent.
+    /// </remarks>
+    private static readonly SoftwareSource[] _software =
+    [
+        new("software_deb", "name", "version", PublisherColumn: null),
+        new("software_rpm", "name", "version", "vendor"),
+    ];
 
     /// <summary>
     /// Reduces the machine's block devices to one encryption reading.
