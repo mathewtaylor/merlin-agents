@@ -105,6 +105,9 @@ handled differently from every other reading.
   yes, the agent does not run the inventory queries at all: the list is not read on the machine,
   let alone sent. Anything other than a clear yes, including an older Merlin that never answers,
   counts as no.
+- **A machine recorded in Merlin as a personal device answers no by default**, even with inventory
+  switched on, so its software list is not read; an administrator can still turn it on or off for
+  that one machine.
 - **A change takes effect one report late.** Switched on, a machine first reads its list on the
   report after the one that brought the news; switched off, it may send one more list before it
   hears. Merlin drops any list that arrives while inventory is off — it is not stored, and it is
