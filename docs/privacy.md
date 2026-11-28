@@ -99,15 +99,20 @@ handled differently from every other reading.
   is not. **macOS** reads application bundles (`apps`) with no publisher, because a bundle has none.
   **Linux** reads the installed `deb` or `rpm` packages, sending an RPM's vendor (the distributor)
   as its publisher.
-- **The agent always collects and sends it; your Merlin deployment decides whether to keep it.**
-  Software inventory is **off by default**, and only a Merlin Administrator can switch it on. While
-  it is off the server drops the list on arrival: it is not stored, and it is removed from the copy
-  of the report Merlin keeps. Switching it off deletes every list already held.
-- **Why not stop the agent sending it?** Merlin has no way to send a setting to a machine — the
-  only thing it ever tells an agent is which version to run (see [protocol.md](protocol.md)), and
-  that is kept deliberately narrow. Adding a channel for one switch would widen what a server can
-  tell a machine to do, which is the property this project protects hardest. The cost is that the
-  list crosses the wire to your own deployment even where it is not kept; it goes nowhere else.
+- **The list never leaves a machine unless a Merlin Administrator has switched software inventory
+  on.** It is **off by default**. Each time Merlin accepts a report it answers with one yes-or-no —
+  whether this deployment keeps software lists — and the agent remembers it. Until it has been told
+  yes, the agent does not run the inventory queries at all: the list is not read on the machine,
+  let alone sent. Anything other than a clear yes, including an older Merlin that never answers,
+  counts as no.
+- **A change takes effect one report late.** Switched on, a machine first reads its list on the
+  report after the one that brought the news; switched off, it may send one more list before it
+  hears. Merlin drops any list that arrives while inventory is off — it is not stored, and it is
+  removed from the copy of the report Merlin keeps — and switching off deletes every list already
+  held.
+- **That answer is the only setting a server sends a machine, and it can only switch reading OFF.**
+  It names no query and no action; see [protocol.md](protocol.md). `merlin-agent manifest` marks the
+  inventory queries as run only while the switch is on.
 
 ---
 

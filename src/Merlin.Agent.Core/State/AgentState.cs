@@ -82,6 +82,11 @@ namespace Merlin.Agent.Core.State;
 /// swaps in a bad agent, reverts it a day later, is advertised the same version the day after, and
 /// the machine oscillates between a working agent and a broken one forever.
 /// </param>
+/// <param name="SoftwareInventoryEnabled">
+/// Whether the server last said this deployment keeps installed-software lists. <b>False until a
+/// server has said otherwise</b>, and while false the inventory queries are not run at all — see
+/// <c>SoftwareInventoryGate</c>.
+/// </param>
 public sealed record AgentStateData(
     string ServerUrl,
     Guid DeviceId,
@@ -107,7 +112,8 @@ public sealed record AgentStateData(
     AgentUpdateOutcome? LastUpdateOutcome = null,
     DateTimeOffset? LastUpdateAt = null,
     string? LastUpdateDetail = null,
-    string? LastRevertedVersion = null)
+    string? LastRevertedVersion = null,
+    bool SoftwareInventoryEnabled = false)
 {
     /// <summary>The recorded installed version of one component.</summary>
     /// <param name="component">The component.</param>

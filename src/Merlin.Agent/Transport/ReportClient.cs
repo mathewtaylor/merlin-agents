@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Merlin.Agent.Core.Collection;
 using Merlin.Agent.Core.Contracts;
 using Merlin.Agent.Core.Crypto;
 
@@ -13,7 +14,15 @@ namespace Merlin.Agent.Transport;
 /// <param name="Succeeded">Whether Merlin accepted it.</param>
 /// <param name="Detail">Human-readable detail for the console.</param>
 /// <param name="ServerTime">The server's clock, where it told us.</param>
-public sealed record TransportResult(bool Succeeded, string Detail, DateTimeOffset? ServerTime);
+/// <param name="SoftwareInventoryEnabled">
+/// For an accepted report: whether the server said to read installed software next time. False for
+/// anything that is not an explicit yes, including an older server's empty body.
+/// </param>
+public sealed record TransportResult(
+    bool Succeeded,
+    string Detail,
+    DateTimeOffset? ServerTime,
+    bool SoftwareInventoryEnabled = false);
 
 /// <summary>
 /// Signs and posts everything the agent sends.
@@ -204,7 +213,13 @@ public sealed class ReportClient : IDisposable
 
                 if (response.IsSuccessStatusCode)
                 {
-                    return (new TransportResult(true, "Report accepted.", null), json);
+                    return (
+                        new TransportResult(
+                            true,
+                            "Report accepted.",
+                            null,
+                            SoftwareInventoryGate.ReadEnabled(content)),
+                        json);
                 }
 
                 if (TryLearnOffset(response.StatusCode, content, now, attempt))

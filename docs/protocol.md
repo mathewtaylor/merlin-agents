@@ -190,16 +190,29 @@ The installed-software inventory: a list of `{ "name", "version", "publisher" }`
 inventory query returned nothing** — Merlin reads a missing list as not observed and keeps what it
 held, whereas an empty list would replace it. Bounded at 5,000 items and about 450,000 characters.
 
-The agent sends it on every report. **Merlin keeps it only where an Administrator has switched
-software inventory on**; otherwise the server drops it before anything is stored, including from
-the stored copy of the report. There is no way for the server to tell the agent not to send it,
-and that is deliberate — see `GET /api/agent/update` below for why the server says so little to a
-machine. A Merlin release predating the field ignores it — but also enforces the older 256 KB body
-limit, so a machine with a large inventory can be refused by one. Point an agent carrying this
-field only at a Merlin that accepts it; the server's own package manifest decides which agent
-version a deployment installs and advertises, so in practice the order is server first.
+**The agent collects and sends it only after the server has said yes** (see the response below).
+Until then — a new install, a machine moved to another deployment, or a server that never answers
+the question — the inventory queries are not run at all. The answer reaches a machine one report
+late: the report that carries it was collected before it arrived.
 
-**202** on acceptance.
+Merlin still drops a list that arrives while software inventory is switched off, before anything is
+stored, including from the stored copy of the report. That covers the one-report lag after an
+Administrator switches it off, and an agent build that sent the list unconditionally.
+
+**202** on acceptance, with a body saying what to collect next time:
+
+```json
+{ "softwareInventoryEnabled": false }
+```
+
+`softwareInventoryEnabled` is read live from the deployment's switch. **Anything other than an
+explicit `true` means off** — no body (a Merlin predating the field), a body that is not JSON, or a
+missing member. The agent keeps the last answer in its state file, so it survives a restart, and
+keeps it unchanged when a report is refused or Merlin cannot be reached.
+
+This is a collection preference, not a command: it can only stop the agent reading something it
+reads by default-off design. It names no query, no path and no action, and it is the only member.
+The narrowness argument under `GET /api/agent/update` applies to it unchanged.
 
 ## `GET /api/agent/update`
 

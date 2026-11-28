@@ -160,7 +160,8 @@ public static class Program
 
         using (key)
         {
-            AgentReportPayload payload = Collect();
+            // Enrolment sends identity only, so it never needs the inventory.
+            AgentReportPayload payload = Collect(includeSoftware: false);
 
             AgentEnrolRequest request = new(
                 DeviceKey.PublicKey(key),
@@ -224,6 +225,9 @@ public static class Program
                 LastUpdateOutcome = movedDeployment ? null : enrolled.LastUpdateOutcome,
                 LastUpdateAt = movedDeployment ? null : enrolled.LastUpdateAt,
                 LastUpdateDetail = movedDeployment ? null : enrolled.LastUpdateDetail,
+
+                // Another deployment's switch says nothing about this one: off until it answers.
+                SoftwareInventoryEnabled = !movedDeployment && enrolled.SoftwareInventoryEnabled,
                 DeviceId = response.DeviceId,
                 DeviceCode = response.DeviceCode,
                 EnrolledAt = DateTimeOffset.UtcNow,
@@ -286,7 +290,8 @@ public static class Program
             InstallLayout.Current,
             () => new DeviceUpdateSession(async (key, state, token) =>
             {
-                AgentReportPayload payload = Collect() with
+                // Installed software only where the server last said yes; off by default.
+                AgentReportPayload payload = Collect(state.SoftwareInventoryEnabled) with
                 {
                     // THE OUTCOME IS REPORTED, NEVER INFERRED. A server watching only the agent
                     // version cannot tell "updated and rolled back" from "never attempted" — both
@@ -334,6 +339,12 @@ public static class Program
                     ClockOffsetSeconds = client.ClockOffsetSeconds,
                     LastReportAt = result.Succeeded ? DateTimeOffset.UtcNow : state.LastReportAt,
                     LastReportJson = json,
+
+                    // The server's answer governs the NEXT run. A refused or unreachable report
+                    // carries no answer, so the last one stands.
+                    SoftwareInventoryEnabled = result.Succeeded
+                        ? result.SoftwareInventoryEnabled
+                        : state.SoftwareInventoryEnabled,
                 };
             }),
 
@@ -614,6 +625,13 @@ public static class Program
         {
             Console.WriteLine($"  [{name}]");
             Console.WriteLine($"  {sql}");
+
+            if (SoftwareInventoryGate.QueryNames.Contains(name))
+            {
+                Console.WriteLine(
+                    "  Run ONLY while your Merlin administrator has switched software inventory on.");
+            }
+
             Console.WriteLine();
         }
 
@@ -728,7 +746,8 @@ public static class Program
 
         using (key)
         {
-            AgentReportPayload payload = Collect();
+            // No inventory in the proving report: the new address has not said yes yet.
+            AgentReportPayload payload = Collect(includeSoftware: false);
 
             using ReportClient client = new(server, key, Version);
 
@@ -751,6 +770,7 @@ public static class Program
                 ClockOffsetSeconds = client.ClockOffsetSeconds,
                 LastReportAt = DateTimeOffset.UtcNow,
                 LastReportJson = json,
+                SoftwareInventoryEnabled = result.SoftwareInventoryEnabled,
             });
 
             Console.WriteLine($"Now reporting to {server}.");
@@ -925,7 +945,12 @@ public static class Program
     /// and the normaliser together — so a machine can never read one platform's queries through
     /// another's normaliser, which would produce a report that is internally consistent and wrong.
     /// </remarks>
-    private static AgentReportPayload Collect()
+    /// <param name="includeSoftware">
+    /// Whether to read installed software. False unless the server last said this deployment keeps
+    /// it — and then the inventory queries are removed from the pack, not merely left out of the
+    /// report. See <see cref="SoftwareInventoryGate"/>.
+    /// </param>
+    private static AgentReportPayload Collect(bool includeSoftware)
     {
         // ONE DEADLINE FOR THE WHOLE COLLECTION, created before the first external process and
         // shared by every phase. All of this runs while the agent holds the machine-wide lock, and
@@ -956,7 +981,7 @@ public static class Program
             osqueryVersion = runner.Version();
 
             results = runner.RunAll(
-                QueryPack.Load(),
+                SoftwareInventoryGate.Filter(QueryPack.Load(), includeSoftware),
                 (name, detail) => Console.Error.WriteLine($"  query '{name}' failed: {detail}"));
         }
 

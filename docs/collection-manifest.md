@@ -57,8 +57,9 @@ never becomes a pass or a failure.
 
 ### All platforms
 
-- **Installed software is name, version and publisher only**, and is kept only by a deployment
-  that has switched software inventory on — see [privacy.md](privacy.md) § Software inventory.
+- **Installed software is name, version and publisher only**, and the inventory queries run only
+  after the deployment has told this machine that software inventory is switched on (off by
+  default) — see [privacy.md](privacy.md) § Software inventory.
   macOS sends no publisher (a bundle has none) and Debian-family Linux sends none either (the only
   candidate, the maintainer, is often a person). An approved-list entry that names a publisher
   therefore never matches those machines; leave the publisher blank for software they run.
